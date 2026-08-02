@@ -14,6 +14,7 @@
 
 SUMMARY_FILE="audit-smart-summary.md"
 DETAILED_FILE="report-detailed.log"
+FINDINGS_FILE="audit-findings.log"
 DEBUG_LOG="audit-debug.log"
 
 STATE_DIR=$(mktemp -d /tmp/bc-audit.XXXXXX)
@@ -23,7 +24,9 @@ if [ -f "$DEBUG_LOG" ]; then
     mv -f "$DEBUG_LOG" "${DEBUG_LOG}.prev" 2>/dev/null || rm -f "$DEBUG_LOG"
 fi
 
-exec > >(stdbuf -o0 tr -cd '\11\12\15\40-\176' | tee -a "$DEBUG_LOG") 2>&1
+# Keep the ESC byte (octal 033).  tput emits terminal escape sequences for
+# colours; filtering out ESC leaves broken literal text such as "[32m".
+exec > >(stdbuf -o0 tr -cd '\11\12\15\33\40-\176' | tee -a "$DEBUG_LOG") 2>&1
 
 echo "=== Starting Bobcares Smart Audit at $(date) ==="
 echo "Debug log: $DEBUG_LOG | State dir: $STATE_DIR"
@@ -415,13 +418,13 @@ check_system_firewall() {
     if csf -l &>/dev/null || systemctl is-active --quiet firewalld 2>/dev/null || systemctl is-active --quiet ufw 2>/dev/null; then
         SYSTEM_FIREWALL_STATUS="ðŸŸ¢ Good"; SYSTEM_FIREWALL_ANALYSIS="Active"
     else
-        SYSTEM_FIREWALL_STATUS="ðŸŸ¡ Warning"; SYSTEM_FIREWALL_ANALYSIS="Recommend enabling CSF or firewalld"
+        SYSTEM_FIREWALL_STATUS="ðŸ”´ Missing"; SYSTEM_FIREWALL_ANALYSIS="No active firewall detected; enable CSF, firewalld, or ufw"
     fi
     export SYSTEM_FIREWALL_STATUS SYSTEM_FIREWALL_ANALYSIS
 }
 
 check_brute_force_protection() {
-    BRUTE_STATUS="ðŸŸ¡ Warning"; BRUTE_REASON="No active brute force protection detected"
+    BRUTE_STATUS="ðŸ”´ Missing"; BRUTE_REASON="No active brute-force protection detected"
 
     if command -v imunify360-agent >/dev/null 2>&1 && systemctl is-active --quiet imunify360 2>/dev/null; then
         BRUTE_STATUS="ðŸŸ¢ Good"; BRUTE_REASON="Imunify360 active"
@@ -458,14 +461,18 @@ check_root_password_age() {
 check_threat_tools() {
     local clam="no" cron="no"
     command -v clamscan >/dev/null 2>&1 && clam="yes"
-    [ -f /etc/cron.d/bc-malware-scan ] && cron="yes"
+    if [[ -f /etc/cron.d/bc-malware-scan ]] \
+        && grep -Eqv '^[[:space:]]*(#|$)' /etc/cron.d/bc-malware-scan \
+        && grep -Eqi 'bobcares-malware-scan|run-weekly-malware-scan' /etc/cron.d/bc-malware-scan; then
+        cron="yes"
+    fi
 
     if [[ "$clam" == "yes" && "$cron" == "yes" ]]; then
         MALWARE_SCANNER_STATUS="ðŸŸ¢ Good"
-        MALWARE_SCANNER_DETAIL="ClamAV installed + weekly Bobcares scan cron active"
+        MALWARE_SCANNER_DETAIL="ClamAV installed; /etc/cron.d/bc-malware-scan is active"
     elif [[ "$clam" == "yes" ]]; then
         MALWARE_SCANNER_STATUS="ðŸŸ¡ Partial"
-        MALWARE_SCANNER_DETAIL="ClamAV installed but scheduled scan cron missing"
+        MALWARE_SCANNER_DETAIL="ClamAV installed, but /etc/cron.d/bc-malware-scan is missing or inactive"
     else
         MALWARE_SCANNER_STATUS="ðŸ”´ Missing"
         MALWARE_SCANNER_DETAIL="No malware scanner detected"
@@ -505,12 +512,17 @@ check_malware_scan_results() {
         local malware_count
         malware_count=$(grep -c '^File: ' "$report" 2>/dev/null || echo 0)
 
-        if [[ $malware_count -eq 0 ]]; then
-            MALWARE_RESULT_STATUS="ðŸŸ¢ Clean"
-            MALWARE_RESULT_DETAIL="No malware found (last scan: ${rdate:-unknown})"
-        else
+        local age_days
+        age_days=$(( ($(date +%s) - $(stat -c %Y "$report" 2>/dev/null || date +%s)) / 86400 ))
+        if [[ $malware_count -gt 0 ]]; then
             MALWARE_RESULT_STATUS="ðŸ”´ Infected"
             MALWARE_RESULT_DETAIL="$malware_count suspicious file(s) found (last scan: ${rdate:-unknown})"
+        elif (( age_days > 30 )); then
+            MALWARE_RESULT_STATUS="ðŸŸ¡ Review"
+            MALWARE_RESULT_DETAIL="No malware found, but the scan report is $age_days day(s) old (last scan: ${rdate:-unknown})"
+        else
+            MALWARE_RESULT_STATUS="ðŸŸ¢ Clean"
+            MALWARE_RESULT_DETAIL="No malware found (last scan: ${rdate:-unknown})"
         fi
     elif [ -f "$old_report" ]; then
         # Fallback to old combined report if new individual file not present
@@ -521,12 +533,17 @@ check_malware_scan_results() {
             cnt=$(grep -cvE '^[[:space:]]*(#|$)' "$files" 2>/dev/null)
             [[ ! "$cnt" =~ ^[0-9]+$ ]] && cnt=0
         fi
-        if [[ $cnt -eq 0 ]]; then
-            MALWARE_RESULT_STATUS="ðŸŸ¢ Clean"
-            MALWARE_RESULT_DETAIL="No malware found (last scan: ${rdate:-unknown})"
-        else
+        local age_days
+        age_days=$(( ($(date +%s) - $(stat -c %Y "$old_report" 2>/dev/null || date +%s)) / 86400 ))
+        if [[ $cnt -gt 0 ]]; then
             MALWARE_RESULT_STATUS="ðŸ”´ Infected"
             MALWARE_RESULT_DETAIL="$cnt suspicious file(s) in $files (last scan: ${rdate:-unknown})"
+        elif (( age_days > 30 )); then
+            MALWARE_RESULT_STATUS="ðŸŸ¡ Review"
+            MALWARE_RESULT_DETAIL="No malware found, but the scan report is $age_days day(s) old (last scan: ${rdate:-unknown})"
+        else
+            MALWARE_RESULT_STATUS="ðŸŸ¢ Clean"
+            MALWARE_RESULT_DETAIL="No malware found (last scan: ${rdate:-unknown})"
         fi
     fi
 
@@ -556,47 +573,36 @@ check_malware_scan_results() {
 }
 
 check_rootkit_scan_results() {
-    ROOTKIT_RESULT_STATUS="ðŸ”µ Unknown"
-    ROOTKIT_RESULT_DETAIL="No rootkit scan report found"
+    ROOTKIT_RESULT_STATUS="ðŸŸ¡ Review"
+    ROOTKIT_RESULT_DETAIL="Rootkit summary is unavailable; check the latest scan log"
 
-    local chkreport="/root/scripts/chkrootkit-report.txt"
-
-    if [ -f "$chkreport" ]; then
-        local rdate
-        rdate=$(date -r "$chkreport" '+%Y-%m-%d %H:%M' 2>/dev/null)
-
-        # The new individual chkrootkit-report.txt contains the raw output.
-        # We look for lines that start with "/" after the "Searching for suspicious files" section.
-        # Note: Some paths (build-id, debug, firmware) are often false positives.
-        local suspicious
-        suspicious=$(awk '/Searching for suspicious files and dirs/,0' "$chkreport" 2>/dev/null | grep -E '^/' | wc -l)
-
-        if [[ $suspicious -eq 0 ]]; then
+    # rkhunter's summary is authoritative.  Individual Warning lines commonly
+    # include harmless configuration/file-property notices and are not rootkits.
+    local log possible="" rdate
+    for log in /root/scripts/chkrootkit-report.txt /var/log/rkhunter/rkhunter.log /var/log/rkhunter.log; do
+        [[ -f "$log" ]] || continue
+        possible=$(awk '
+            tolower($0) ~ /possible rootkits[[:space:]]*:/ {
+                value=tolower($0)
+                sub(/.*possible rootkits[[:space:]]*:[[:space:]]*/, "", value)
+                sub(/[^0-9].*/, "", value)
+            }
+            END { print value }
+        ' "$log" 2>/dev/null)
+        [[ "$possible" =~ ^[0-9]+$ ]] || continue
+        rdate=$(date -r "$log" '+%Y-%m-%d %H:%M' 2>/dev/null)
+        if (( possible == 0 )); then
             ROOTKIT_RESULT_STATUS="ðŸŸ¢ Clean"
-            ROOTKIT_RESULT_DETAIL="No suspicious files reported by chkrootkit (last scan: ${rdate:-unknown})"
+            ROOTKIT_RESULT_DETAIL="Possible rootkits: 0 (last scan: ${rdate:-unknown})"
+        elif (( possible > 10 )); then
+            ROOTKIT_RESULT_STATUS="ðŸ”´ Infected"
+            ROOTKIT_RESULT_DETAIL="Possible rootkits: $possible (last scan: ${rdate:-unknown})"
         else
             ROOTKIT_RESULT_STATUS="ðŸŸ¡ Review"
-            ROOTKIT_RESULT_DETAIL="$suspicious suspicious item(s) flagged by chkrootkit (last scan: ${rdate:-unknown}) - review manually (many are false positives)"
+            ROOTKIT_RESULT_DETAIL="Possible rootkits: $possible; verify the scan result (last scan: ${rdate:-unknown})"
         fi
-    else
-        # Fallback to old rkhunter logic
-        local log
-        for log in /var/log/rkhunter/rkhunter.log /var/log/rkhunter.log; do
-            [ -f "$log" ] || continue
-            local w rdate
-            w=$(grep -c 'Warning:' "$log" 2>/dev/null)
-            [[ ! "$w" =~ ^[0-9]+$ ]] && w=0
-            rdate=$(date -r "$log" '+%Y-%m-%d' 2>/dev/null)
-            if [[ $w -eq 0 ]]; then
-                ROOTKIT_RESULT_STATUS="ðŸŸ¢ Clean"
-                ROOTKIT_RESULT_DETAIL="No warnings in rkhunter log (${rdate:-unknown})"
-            else
-                ROOTKIT_RESULT_STATUS="ðŸŸ¡ Review"
-                ROOTKIT_RESULT_DETAIL="$w warning(s) in $log (${rdate:-unknown}) - review manually"
-            fi
-            break
-        done
-    fi
+        break
+    done
 
     export ROOTKIT_RESULT_STATUS ROOTKIT_RESULT_DETAIL
 }
@@ -761,8 +767,11 @@ check_reboot_required() {
 check_package_updates() {
     echo "[DEBUG] Checking for package updates..."
     OS_UPDATE_COUNT=0; SEC_UPDATE_COUNT=0
-    PHP_UPDATE_COUNT=0; HTTPD_UPDATE_COUNT=0; MYSQL_UPDATE_COUNT=0
+    PHP_UPDATE_COUNT=0; HTTPD_UPDATE_COUNT=0; MYSQL_UPDATE_COUNT=0; KERNEL_UPDATE_COUNT=0
     OTHER_UPDATE_COUNT=0; OTHER_UPDATE_PKGS=""
+    UPDATE_ALL_LIST=""; KERNEL_UPDATE_LIST=""; PHP_UPDATE_LIST=""
+    HTTPD_UPDATE_LIST=""; MYSQL_UPDATE_LIST=""; OTHER_UPDATE_LIST=""
+    local -a _pkg_updates=()
 
     if [[ "$PKG_MGR" == "dnf" || "$PKG_MGR" == "yum" ]]; then
         mapfile -t _pkg_updates < <($PKG_MGR check-update --quiet 2>/dev/null | grep -E '^\S+\.\S+\s+\S+\s+\S+' || true)
@@ -770,10 +779,11 @@ check_package_updates() {
 
         if [[ $OS_UPDATE_COUNT -gt 0 ]]; then
             PHP_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(ea-php|alt-php|php)' || true)
-            HTTPD_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(httpd|ea-apache24)' || true)
-            MYSQL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(MariaDB-|mysql-|mariadb-)' || true)
+            HTTPD_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(httpd|ea-apache24|nginx|openlitespeed|litespeed)' || true)
+            MYSQL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Eci '^(MariaDB-|mysql-|mariadb-|percona)' || true)
+            KERNEL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(kernel|linux-firmware)' || true)
             OTHER_UPDATE_PKGS=$(printf '%s\n' "${_pkg_updates[@]}" \
-                | grep -Ev '^(ea-php|alt-php|php|httpd|ea-apache24|MariaDB-|mysql-|mariadb-)' \
+                | grep -Evi '^(ea-php|alt-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|MariaDB-|mysql-|mariadb-|percona|kernel|linux-firmware)' \
                 | awk -F. '{print $1}' | sort -u | paste -sd ', ' - | head -c 300)
         fi
 
@@ -790,19 +800,38 @@ check_package_updates() {
 
         if [[ $OS_UPDATE_COUNT -gt 0 ]]; then
             PHP_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^php' || true)
-            HTTPD_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(apache2|httpd)' || true)
-            MYSQL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(mariadb-server|mysql-server)' || true)
+            HTTPD_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(apache2|httpd|nginx|openlitespeed|litespeed)' || true)
+            MYSQL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Eci '^(mariadb|mysql|percona)' || true)
+            KERNEL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^linux-(base|image|headers|modules|generic|tools|firmware)' || true)
             SEC_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -ci 'security' || true)
             OTHER_UPDATE_PKGS=$(printf '%s\n' "${_pkg_updates[@]}" \
-                | grep -Ev '^(php|apache2|httpd|mariadb-server|mysql-server)' \
+                | grep -Evi '^(php|apache2|httpd|nginx|openlitespeed|litespeed|mariadb|mysql|percona|linux-(base|image|headers|modules|generic|tools|firmware))' \
                 | awk -F/ '{print $1}' | sort -u | paste -sd ', ' - | head -c 300)
         fi
     fi
 
-    OTHER_UPDATE_COUNT=$(( OS_UPDATE_COUNT - PHP_UPDATE_COUNT - HTTPD_UPDATE_COUNT - MYSQL_UPDATE_COUNT ))
+    OTHER_UPDATE_COUNT=$(( OS_UPDATE_COUNT - PHP_UPDATE_COUNT - HTTPD_UPDATE_COUNT - MYSQL_UPDATE_COUNT - KERNEL_UPDATE_COUNT ))
     (( OTHER_UPDATE_COUNT < 0 )) && OTHER_UPDATE_COUNT=0
 
-    export OS_UPDATE_COUNT SEC_UPDATE_COUNT PHP_UPDATE_COUNT HTTPD_UPDATE_COUNT MYSQL_UPDATE_COUNT OTHER_UPDATE_COUNT OTHER_UPDATE_PKGS
+    # Preserve the complete package-manager entries for audit-findings.log.
+    # These lists include target and installed versions, not just package names.
+    UPDATE_ALL_LIST=$(printf '%s\n' "${_pkg_updates[@]}")
+    if [[ "$PKG_MGR" == "apt" ]]; then
+        KERNEL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^linux-(base|image|headers|modules|generic|tools|firmware)' || true)
+        PHP_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^php' || true)
+        HTTPD_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(apache2|httpd|nginx|openlitespeed|litespeed)' || true)
+        MYSQL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ei '^(mariadb|mysql|percona)' || true)
+        OTHER_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Evi '^(php|apache2|httpd|nginx|openlitespeed|litespeed|mariadb|mysql|percona|linux-(base|image|headers|modules|generic|tools|firmware))' || true)
+    else
+        KERNEL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(kernel|linux-firmware)' || true)
+        PHP_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(ea-php|alt-php|php)' || true)
+        HTTPD_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(httpd|ea-apache24|nginx|openlitespeed|litespeed)' || true)
+        MYSQL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ei '^(MariaDB-|mysql-|mariadb-|percona)' || true)
+        OTHER_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Evi '^(ea-php|alt-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|MariaDB-|mysql-|mariadb-|percona|kernel|linux-firmware)' || true)
+    fi
+
+    export OS_UPDATE_COUNT SEC_UPDATE_COUNT PHP_UPDATE_COUNT HTTPD_UPDATE_COUNT MYSQL_UPDATE_COUNT KERNEL_UPDATE_COUNT OTHER_UPDATE_COUNT OTHER_UPDATE_PKGS \
+           UPDATE_ALL_LIST KERNEL_UPDATE_LIST PHP_UPDATE_LIST HTTPD_UPDATE_LIST MYSQL_UPDATE_LIST OTHER_UPDATE_LIST
 }
 
 #-------------------------------------------------------------------------------
@@ -811,46 +840,17 @@ check_package_updates() {
 
 
 check_system_version() {
-    SYSTEM_UPDATE_STATUS="ðŸ”µ Unknown"
-    SYSTEM_LATEST="Unknown"
-    SYSTEM_SOURCE="Package Manager"
-
-    local updates=0
-
-    case "$PKG_MGR" in
-        dnf)
-            updates=$(dnf check-update -q 2>/dev/null | awk 'NF>=3' | wc -l)
-            ;;
-        yum)
-            updates=$(yum check-update -q 2>/dev/null | awk 'NF>=3' | wc -l)
-            ;;
-        apt)
-            apt-get update -qq >/dev/null 2>&1
-            updates=$(apt list --upgradable 2>/dev/null | grep -vc "^Listing")
-            ;;
-        *)
-            SYSTEM_UPDATE_STATUS="ðŸ”µ Unknown"
-            export SYSTEM_UPDATE_STATUS SYSTEM_LATEST SYSTEM_SOURCE
-            return
-            ;;
-    esac
-
-    if [[ "$updates" =~ ^[0-9]+$ ]]; then
-        SYSTEM_LATEST="$updates package update(s)"
-        if [[ "$updates" -eq 0 ]]; then
-            SYSTEM_UPDATE_STATUS="ðŸŸ¢ Up to Date"
-        else
-            SYSTEM_UPDATE_STATUS="ðŸŸ¡ Update Available"
-        fi
-    else
-        SYSTEM_UPDATE_STATUS="ðŸ”µ Unknown"
-    fi
+    # The Operating System row represents kernel currency only.  Application
+    # packages are reported separately as PHP, web server, database, or Other.
+    SYSTEM_UPDATE_STATUS="$KERNEL_STATUS"
+    SYSTEM_LATEST="Running kernel: $KERNEL_RUNNING; kernel packages pending: ${KERNEL_UPDATE_COUNT:-0}${KERNEL_ANALYSIS:+; $KERNEL_ANALYSIS}"
+    SYSTEM_SOURCE="Kernel"
 
     export SYSTEM_UPDATE_STATUS SYSTEM_LATEST SYSTEM_SOURCE
 }
 
 check_modsecurity() {
-    MODSEC_STATUS="ðŸŸ¡ Warning"
+    MODSEC_STATUS="ðŸ”´ Missing"
     MODSEC_REASON="ModSecurity not detected"
 
     local apache_conf=""
@@ -890,12 +890,12 @@ check_modsecurity() {
         elif grep -Riq "SecRuleEngine[[:space:]]\+DetectionOnly" \
             /etc/httpd /etc/apache2 /usr/local/apache/conf 2>/dev/null; then
 
-            MODSEC_STATUS="ðŸŸ¡ Warning"
+            MODSEC_STATUS="ðŸŸ¡ Review"
             MODSEC_REASON="ModSecurity in DetectionOnly mode"
 
         else
 
-            MODSEC_STATUS="ðŸŸ¡ Warning"
+            MODSEC_STATUS="ðŸ”´ Missing"
             MODSEC_REASON="ModSecurity module loaded but rule engine disabled"
 
         fi
@@ -1045,99 +1045,103 @@ check_backups() {
 #-------------------------------------------------------------------------------
 
 check_backup_extended() {
-    BACKUP_DAILY_STATUS="ðŸ”µ Unknown";    BACKUP_DAILY_DETAIL="No backup schedule found"
-    BACKUP_WEEKLY_STATUS="ðŸ”µ Unknown";   BACKUP_WEEKLY_DETAIL="No backup schedule found"
-    BACKUP_MONTHLY_STATUS="ðŸ”µ Unknown";  BACKUP_MONTHLY_DETAIL="No backup schedule found"
-    BACKUP_REMOTE_STATUS="ðŸ”´ Not configured"; BACKUP_REMOTE_DETAIL="No remote backup configuration found"
-    BACKUP_LAST_STATUS="ðŸ”µ Unknown"; BACKUP_LAST_DETAIL="No backup found on disk"
-    BACKUP_SIZE_STATUS="ðŸ”µ Unknown"; BACKUP_SIZE_DETAIL="N/A"
-
-    local backup_dirs=(
-        /backup
-        /backups
-        /var/backups
-        /home/backup
-        /data/backup
-        /mnt/backup
-        /opt/backup
+    # Only treat named backup locations and likely backup archives as backups.
+    # This deliberately excludes package-manager files such as /var/backups/dpkg.*.
+    local backup_dirs=(/backup /backups /home/backup /home/backups /data/backup /data/backups /mnt/backup /mnt/backups /opt/backup /opt/backups)
+    local dir file base mtime latest="" latest_time=0 size size_kb age_days backup_dir_count=0
+    while IFS= read -r dir; do backup_dirs+=("$dir"); done < <(
+        find /home /data /mnt -maxdepth 3 -type d \( -iname '*backup*' -o -iname 'cpbackup' \) 2>/dev/null
     )
 
-    local latest=""
-    local latest_time=0
+    BACKUP_DAILY_STATUS="ðŸ”µ N/A"; BACKUP_DAILY_DETAIL="N/A - no backup cron found"
+    BACKUP_WEEKLY_STATUS="ðŸ”µ N/A"; BACKUP_WEEKLY_DETAIL="N/A - no backup cron found"
+    BACKUP_MONTHLY_STATUS="ðŸ”µ N/A"; BACKUP_MONTHLY_DETAIL="N/A - no backup cron found"
+    BACKUP_RETENTION_STATUS="ðŸ”µ N/A"; BACKUP_RETENTION_DETAIL="N/A - retention cannot be determined from a cron schedule"
+    BACKUP_REMOTE_STATUS="ðŸ”´ Not configured"; BACKUP_REMOTE_DETAIL="No scheduled remote-backup configuration found"
+    BACKUP_LAST_STATUS="ðŸ”µ Unknown"; BACKUP_LAST_DETAIL="No qualifying backup archive found"
+    BACKUP_SIZE_STATUS="ðŸ”µ Unknown"; BACKUP_SIZE_DETAIL="N/A"
 
-    # Check backup schedules
-    if grep -RiqE 'backup|rsync|borg|restic|duplicity|rdiff|tar' \
-        /etc/crontab /etc/cron.d /var/spool/cron 2>/dev/null; then
-
-        BACKUP_DAILY_STATUS="ðŸŸ¢ Configured"
-        BACKUP_DAILY_DETAIL="Backup cron job detected"
-
-        BACKUP_WEEKLY_STATUS="ðŸŸ¢ Configured"
-        BACKUP_WEEKLY_DETAIL="Verify cron schedule"
-
-        BACKUP_MONTHLY_STATUS="ðŸŸ¢ Configured"
-        BACKUP_MONTHLY_DETAIL="Verify cron schedule"
+    local cron_lines cron_schedule
+    cron_lines=$({
+        [[ -f /etc/crontab ]] && cat /etc/crontab
+        find /etc/cron.d /var/spool/cron -maxdepth 2 -type f -exec cat {} + 2>/dev/null
+        crontab -l 2>/dev/null
+    } | awk '!/^[[:space:]]*#/ && tolower($0) ~ /backup|restic|borg|rclone|duplicity|rdiff-backup|rsnapshot|jetbackup|cpbackup|aws[[:space:]]+s3/')
+    if [[ -n "$cron_lines" ]]; then
+        BACKUP_DAILY_DETAIL="N/A - no daily backup schedule found"
+        BACKUP_WEEKLY_DETAIL="N/A - no weekly backup schedule found"
+        BACKUP_MONTHLY_DETAIL="N/A - no monthly backup schedule found"
+        cron_schedule=$(awk '
+            /^@daily|^@hourly|^@reboot/ { daily=1; next }
+            /^@weekly/ { weekly=1; next }
+            /^@monthly|^@yearly|^@annually/ { monthly=1; next }
+            NF >= 5 {
+                dom=$3; mon=$4; dow=$5
+                if (dom == "*" && mon == "*" && dow == "*") daily=1
+                if (dow != "*") weekly=1
+                if (dom != "*" || mon != "*") monthly=1
+            }
+            END { printf "%d %d %d", daily, weekly, monthly }
+        ' <<<"$cron_lines")
+        read -r has_daily has_weekly has_monthly <<<"$cron_schedule"
+        [[ "$has_daily" == 1 ]] && { BACKUP_DAILY_STATUS="ðŸŸ¢ Configured"; BACKUP_DAILY_DETAIL="Backup cron schedule detected"; }
+        [[ "$has_weekly" == 1 ]] && { BACKUP_WEEKLY_STATUS="ðŸŸ¢ Configured"; BACKUP_WEEKLY_DETAIL="Backup cron schedule detected"; }
+        [[ "$has_monthly" == 1 ]] && { BACKUP_MONTHLY_STATUS="ðŸŸ¢ Configured"; BACKUP_MONTHLY_DETAIL="Backup cron schedule detected"; }
     fi
 
-    # Detect remote backup tools/configuration
-    if command -v restic >/dev/null 2>&1; then
+    if grep -Eqi 'restic|borg|rclone|duplicity|rdiff-backup|aws[[:space:]]+s3|sftp:|rsync://|ssh://' <<<"$cron_lines" \
+        || [[ -f /root/.config/rclone/rclone.conf || -f /root/.restic/config ]] \
+        || find /etc/restic /etc/borg -maxdepth 2 -type f -print -quit 2>/dev/null | grep -q .; then
         BACKUP_REMOTE_STATUS="ðŸŸ¢ Configured"
-        BACKUP_REMOTE_DETAIL="Restic detected"
-    elif command -v borg >/dev/null 2>&1; then
-        BACKUP_REMOTE_STATUS="ðŸŸ¢ Configured"
-        BACKUP_REMOTE_DETAIL="Borg detected"
-    elif command -v rclone >/dev/null 2>&1; then
-        BACKUP_REMOTE_STATUS="ðŸŸ¢ Configured"
-        BACKUP_REMOTE_DETAIL="rclone detected"
-    elif command -v duplicity >/dev/null 2>&1; then
-        BACKUP_REMOTE_STATUS="ðŸŸ¢ Configured"
-        BACKUP_REMOTE_DETAIL="Duplicity detected"
+        BACKUP_REMOTE_DETAIL="Remote backup configuration or scheduled command detected"
     fi
 
-    # Locate newest backup
     for dir in "${backup_dirs[@]}"; do
         [[ -d "$dir" ]] || continue
-
+        ((backup_dir_count++))
         while IFS= read -r file; do
-            local mtime
+            base=${file##*/}
+            [[ "$base" =~ ^(dpkg|apt|alternatives|btmp|wtmp|lastlog|unattended-upgrades) ]] && continue
+            [[ "$base" =~ (backup|cpbackup|jetbackup|full|daily|weekly|monthly|\.tar(\.(gz|bz2|xz|zst))?$|\.tgz$|\.zip$|\.sql(\.gz)?$) ]] || continue
             mtime=$(stat -c %Y "$file" 2>/dev/null) || continue
-
-            if (( mtime > latest_time )); then
-                latest_time=$mtime
-                latest="$file"
-            fi
-        done < <(find "$dir" -type f 2>/dev/null)
+            (( mtime > latest_time )) && { latest_time=$mtime; latest="$file"; }
+        done < <(find "$dir" -maxdepth 5 -type f -size +1M 2>/dev/null)
     done
 
-    if [[ -n "$latest" ]]; then
-        local age_days size size_kb
-        age_days=$(( ( $(date +%s) - latest_time ) / 86400 ))
-
-        if [[ $age_days -le 2 ]]; then
-            BACKUP_LAST_STATUS="ðŸŸ¢ Recent"
-        elif [[ $age_days -le 8 ]]; then
-            BACKUP_LAST_STATUS="ðŸŸ¡ Aging"
-        else
-            BACKUP_LAST_STATUS="ðŸ”´ Stale"
-        fi
-
-        BACKUP_LAST_DETAIL="$latest (${age_days} day(s) old)"
-
-        size=$(du -sh "$latest" 2>/dev/null | awk '{print $1}')
-        size_kb=$(du -sk "$latest" 2>/dev/null | awk '{print $1}')
-
-        if [[ -n "$size_kb" && "$size_kb" -lt 1024 ]]; then
-            BACKUP_SIZE_STATUS="ðŸŸ¡ Suspicious"
-            BACKUP_SIZE_DETAIL="$size - unusually small, verify backup contents"
-        else
-            BACKUP_SIZE_STATUS="ðŸŸ¢ OK"
-            BACKUP_SIZE_DETAIL="$size"
-        fi
+    # Local backup is valid only when both a backup location and a scheduled
+    # backup cron are present.  One without the other needs verification.
+    if (( backup_dir_count > 0 )) && [[ -n "$cron_lines" ]]; then
+        BACKUP_STATUS="ðŸŸ¢ Good"
+        BACKUP_DETAIL="Backup directory detected ($backup_dir_count location(s)) and backup cron is present"
+    elif (( backup_dir_count > 0 )); then
+        BACKUP_STATUS="ðŸŸ¡ Review"
+        BACKUP_DETAIL="Backup directory detected ($backup_dir_count location(s)), but no backup cron found"
+    elif [[ -n "$cron_lines" ]]; then
+        BACKUP_STATUS="ðŸŸ¡ Review"
+        BACKUP_DETAIL="Backup cron found, but no backup directory detected"
+    else
+        BACKUP_STATUS="ðŸ”´ Missing"
+        BACKUP_DETAIL="No backup directory and no backup cron found"
     fi
 
+    if [[ -n "$latest" ]]; then
+        age_days=$(( ($(date +%s) - latest_time) / 86400 ))
+        if (( age_days <= 2 )); then BACKUP_LAST_STATUS="ðŸŸ¢ Recent"
+        elif (( age_days <= 8 )); then BACKUP_LAST_STATUS="ðŸŸ¡ Aging"
+        else BACKUP_LAST_STATUS="ðŸ”´ Stale"; fi
+        BACKUP_LAST_DETAIL="$latest (${age_days} day(s) old)"
+        size=$(du -sh "$latest" 2>/dev/null | awk '{print $1}')
+        size_kb=$(du -sk "$latest" 2>/dev/null | awk '{print $1}')
+        BACKUP_SIZE_STATUS="ðŸŸ¢ OK"; BACKUP_SIZE_DETAIL="$size"
+    else
+        BACKUP_LAST_DETAIL="No qualifying backup archive found"
+    fi
+
+    export BACKUP_STATUS BACKUP_DETAIL
     export BACKUP_DAILY_STATUS BACKUP_DAILY_DETAIL \
            BACKUP_WEEKLY_STATUS BACKUP_WEEKLY_DETAIL \
            BACKUP_MONTHLY_STATUS BACKUP_MONTHLY_DETAIL \
+           BACKUP_RETENTION_STATUS BACKUP_RETENTION_DETAIL \
            BACKUP_REMOTE_STATUS BACKUP_REMOTE_DETAIL \
            BACKUP_LAST_STATUS BACKUP_LAST_DETAIL \
            BACKUP_SIZE_STATUS BACKUP_SIZE_DETAIL
@@ -1312,26 +1316,73 @@ check_resource_usage() {
 # Reporting (v4 - organized by team audit categories)
 #-------------------------------------------------------------------------------
 
+# Emit a stable status token that a terminal reader and the audit portal can both
+# understand.  Do not use emoji here: they are being stripped/mis-encoded on
+# several target servers and cannot be mapped consistently by the portal.
+portal_status() {
+    local status="${1,,}"
+
+    case "$status" in
+        *"n/a"*|*"unknown"*|*"manual"*|*"host-managed"*) echo "N/A" ;;
+        *"missing"*|*"not found"*|*"not detected"*|*"down"*|*"critical"*|*"enabled"*|*"end of life"*|*"eol"*|*"infected"*|*"stale"*|*"not set"*|*"not configured"*|*"expired"*|*"services down"*|*"listed"*|*"outdated"*|*"update available"*|*"reboot required"*|*"warning"*|*"partial"*|*"high"*|*"insecure"*) echo "RED" ;;
+        *"review"*|*"aging"*|*"recently rebooted"*|*"suspicious"*|*"expiring soon"*|*"needs attention"*) echo "CHECK" ;;
+        *) echo "GREEN" ;;
+    esac
+}
+
+report_item() {
+    # $1: audit item, $2: raw status, $3: human-readable details
+    printf '  %-38s : %-6s - %s\n' "$1" "$(portal_status "$2")" "$3"
+}
+
+colorize_report() {
+    # Keep report-detailed.log plain for the portal.  The audit has already
+    # redirected stdout through tee, so -t cannot be used to detect a terminal.
+    if [[ "${NO_COLOR:-}" == "1" ]]; then
+        cat
+        return
+    fi
+
+    local reset green red yellow grey
+    reset=$(tput sgr0 2>/dev/null || printf '\033[0m')
+    green=$(tput setaf 2 2>/dev/null || printf '\033[32m')
+    red=$(tput setaf 1 2>/dev/null || printf '\033[31m')
+    yellow=$(tput setaf 3 2>/dev/null || printf '\033[33m')
+    grey=$(tput setaf 8 2>/dev/null || printf '\033[90m')
+    [[ -n "$reset" ]] || reset=$'\033[0m'
+    [[ -n "$green" ]] || green=$'\033[32m'
+    [[ -n "$red" ]] || red=$'\033[31m'
+    [[ -n "$yellow" ]] || yellow=$'\033[33m'
+    [[ -n "$grey" ]] || grey=$'\033[90m'
+
+    awk -v reset="$reset" -v green="$green" -v red="$red" -v yellow="$yellow" -v grey="$grey" '
+        / : GREEN / { sub(/GREEN/, green "GREEN" reset) }
+        / : RED /   { sub(/RED/, red "RED" reset) }
+        / : CHECK / { sub(/CHECK/, yellow "CHECK" reset) }
+        / : N\/A /   { sub(/N\/A/, grey "N/A" reset) }
+        { print }
+    '
+}
+
 generate_smart_summary() {
     local os_update_line other_line os_lifetime_line
     local stack_status stack_detail cp_lt_status cp_lt_detail
-    [[ $OS_UPDATE_COUNT -gt 0 ]]     && os_update_line="ðŸŸ¡ Updates Available"   || os_update_line="ðŸŸ¢ Up to Date"
-    [[ $SEC_UPDATE_COUNT -gt 0 ]]    && os_update_line="ðŸ”´ Security Updates Pending"
-    [[ $OTHER_UPDATE_COUNT -gt 0 ]]  && other_line="ðŸŸ¡ Updates Available"       || other_line="ðŸŸ¢ Up to Date"
+    os_update_line=$(portal_status "$KERNEL_STATUS")
+    [[ $OTHER_UPDATE_COUNT -gt 0 ]]  && other_line="RED" || other_line="GREEN"
 
     [[ "$EOL_STATUS" == "Supported" ]] \
-        && os_lifetime_line="ðŸŸ¢ Supported" \
-        || os_lifetime_line="ðŸ”´ End of Life"
+        && os_lifetime_line="GREEN" \
+        || os_lifetime_line="RED"
 
     if [[ "$EOL_STATUS" == "Supported" && "$PHP_EOL_STATUS" == ðŸŸ¢* ]]; then
-        stack_status="ðŸŸ¢ Good"
+        stack_status="GREEN"
         stack_detail="OS and PHP stack are vendor-supported"
     else
-        stack_status="ðŸŸ¡ Review"
+        stack_status="CHECK"
         stack_detail="OS: $EOL_STATUS - PHP: $PHP_EOL_DETAIL"
     fi
 
-    cp_lt_status="ðŸ”µ N/A"
+    cp_lt_status="N/A"
     cp_lt_detail="No control panel detected"
 
     cat > "$SUMMARY_FILE" << EOF
@@ -1356,37 +1407,36 @@ Web Server Uptime : $HTTP_UPTIME
 
 | Audit Item | Status | Analysis / Recommendation |
 |---|---|---|
-| System Firewall | $SYSTEM_FIREWALL_STATUS | $SYSTEM_FIREWALL_ANALYSIS |
-| Malware Scanner | $MALWARE_SCANNER_STATUS | $MALWARE_SCANNER_DETAIL |
-| Failed Login Detection | $BRUTE_STATUS | $BRUTE_REASON |
-| Web App Firewall | $MODSEC_STATUS | $MODSEC_REASON |
-| Rootkit Scanner | $ROOTKIT_SCANNER_STATUS | $ROOTKIT_SCANNER_DETAIL |
+| System Firewall | $(portal_status "$SYSTEM_FIREWALL_STATUS") | $SYSTEM_FIREWALL_ANALYSIS |
+| Malware Scanner | $(portal_status "$MALWARE_SCANNER_STATUS") | $MALWARE_SCANNER_DETAIL |
+| Failed Login Detection | $(portal_status "$BRUTE_STATUS") | $BRUTE_REASON |
+| Web App Firewall | $(portal_status "$MODSEC_STATUS") | $MODSEC_REASON |
+| Rootkit Scanner | $(portal_status "$ROOTKIT_SCANNER_STATUS") | $ROOTKIT_SCANNER_DETAIL |
 
 ## 2. Software Updates
 
 | Audit Item | Status | Analysis / Recommendation |
 |---|---|---|
-| System Packages | $SYSTEM_UPDATE_STATUS | $SYSTEM_LATEST |
-| Operating System | $os_update_line | $OS_NAME $OS_VERSION -> $OS_UPDATE_COUNT pending package(s), $SEC_UPDATE_COUNT security |
-| PHP | $([[ $PHP_UPDATE_COUNT -gt 0 ]] && echo "ðŸŸ¡ Updates Available" || echo "ðŸŸ¢ Up to Date") | $PHP_UPDATE_COUNT pending \| Installed: $PHP_VERSIONS \| Default: $PHP_DEFAULT |
-| CMS | ðŸ”µ Manual | Not auto-detected - verify WordPress/Joomla/etc. versions per account |
-| Web Server | $([[ $HTTPD_UPDATE_COUNT -gt 0 ]] && echo "ðŸŸ¡ Updates Available" || echo "ðŸŸ¢ Up to Date") | $HTTPD_UPDATE_COUNT pending web server update(s) |
-| Database Server | $([[ $MYSQL_UPDATE_COUNT -gt 0 ]] && echo "ðŸŸ¡ Updates Available" || echo "ðŸŸ¢ Up to Date") | $MYSQL_UPDATE_COUNT pending DB update(s) |
+| Operating System / Kernel | $os_update_line | $SYSTEM_LATEST |
+| PHP | $([[ $PHP_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $PHP_UPDATE_COUNT pending \| Installed: $PHP_VERSIONS \| Default: $PHP_DEFAULT |
+| CMS | $(portal_status "$OUTDATED_CMS_STATUS") | $OUTDATED_CMS_DETAIL |
+| Web Server | $([[ $HTTPD_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $HTTPD_UPDATE_COUNT pending web server update(s) |
+| Database Server | $([[ $MYSQL_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $MYSQL_UPDATE_COUNT pending DB update(s) |
 | Other Softwares | $other_line | $OTHER_UPDATE_COUNT other pending package(s)${OTHER_UPDATE_PKGS:+: $OTHER_UPDATE_PKGS} |
-| Kernel | $KERNEL_STATUS | Running: $KERNEL_RUNNING \| Update: $KERNEL_UPDATE_AVAILABLE \| KernelCare: $KC_STATUS |
-| Reboot Required | $REBOOT_STATUS | $REBOOT_REASON |
+| Kernel | $(portal_status "$KERNEL_STATUS") | Running: $KERNEL_RUNNING \| Update: $KERNEL_UPDATE_AVAILABLE \| KernelCare: $KC_STATUS |
+| Reboot Required | $(portal_status "$REBOOT_STATUS") | $REBOOT_REASON |
 
 ## 3. Server Health
 
 | Audit Item | Status | Details |
 |---|---|---|
-| Server Uptime | $UPTIME_STATUS | $UPTIME |
-| HTTP Uptime | $HTTP_STATUS | $HTTP_UPTIME |
-| CPU Usage | $CPU_STATUS | Load average: $LOAD |
-| RAM Usage | $RAM_STATUS | Used: ${RAM_PCT}% |
-| Disc Space Usage | $DISK_STATUS | Used: ${DISK_PCT}% |
-| Email Queue | $EMAIL_STATUS | Queued messages: $EMAIL_QUEUE |
-| IP Reputation | $IP_REPUTATION_STATUS | $IP_REPUTATION_DETAIL |
+| Server Uptime | $(portal_status "$UPTIME_STATUS") | $UPTIME |
+| HTTP Uptime | $(portal_status "$HTTP_STATUS") | $HTTP_UPTIME |
+| CPU Usage | $(portal_status "$CPU_STATUS") | Load average: $LOAD |
+| RAM Usage | $(portal_status "$RAM_STATUS") | Used: ${RAM_PCT}% |
+| Disc Space Usage | $(portal_status "$DISK_STATUS") | Used: ${DISK_PCT}% |
+| Email Queue | $(portal_status "$EMAIL_STATUS") | Queued messages: $EMAIL_QUEUE |
+| IP Reputation | $(portal_status "$IP_REPUTATION_STATUS") | $IP_REPUTATION_DETAIL |
 
 **Overall Server Health:** $OVERALL_HEALTH
 
@@ -1394,13 +1444,14 @@ Web Server Uptime : $HTTP_UPTIME
 
 | Audit Item | Status | Details |
 |---|---|---|
-| Local Backup | $BACKUP_STATUS | $BACKUP_DETAILS |
-| Remote Backup | $BACKUP_REMOTE_STATUS | $BACKUP_REMOTE_DETAIL |
-| Daily Backup | $BACKUP_DAILY_STATUS | $BACKUP_DAILY_DETAIL |
-| Weekly Backup | $BACKUP_WEEKLY_STATUS | $BACKUP_WEEKLY_DETAIL |
-| Monthly Backup | $BACKUP_MONTHLY_STATUS | $BACKUP_MONTHLY_DETAIL |
-| Recent Last Backup | $BACKUP_LAST_STATUS | $BACKUP_LAST_DETAIL |
-| Size Of Last Backup | $BACKUP_SIZE_STATUS | $BACKUP_SIZE_DETAIL |
+| Local Backup | $(portal_status "$BACKUP_STATUS") | $BACKUP_DETAIL |
+| Remote Backup | $(portal_status "$BACKUP_REMOTE_STATUS") | $BACKUP_REMOTE_DETAIL |
+| Daily Backup | $(portal_status "$BACKUP_DAILY_STATUS") | $BACKUP_DAILY_DETAIL |
+| Weekly Backup | $(portal_status "$BACKUP_WEEKLY_STATUS") | $BACKUP_WEEKLY_DETAIL |
+| Monthly Backup | $(portal_status "$BACKUP_MONTHLY_STATUS") | $BACKUP_MONTHLY_DETAIL |
+| Backup Retention | $(portal_status "$BACKUP_RETENTION_STATUS") | $BACKUP_RETENTION_DETAIL |
+| Recent Last Backup | $(portal_status "$BACKUP_LAST_STATUS") | $BACKUP_LAST_DETAIL |
+| Size Of Last Backup | $(portal_status "$BACKUP_SIZE_STATUS") | $BACKUP_SIZE_DETAIL |
 
 ## 5. Software Life Time
 
@@ -1408,22 +1459,22 @@ Web Server Uptime : $HTTP_UPTIME
 |---|---|---|
 | Control Panel | $cp_lt_status | $cp_lt_detail |
 | Operating System | $os_lifetime_line | $OS_NAME $OS_VERSION - $EOL_STATUS by vendor |
-| CMS | ðŸ”µ Manual | Not auto-detected - verify CMS versions per account are vendor-supported |
+| CMS | $(portal_status "$OUTDATED_CMS_STATUS") | $OUTDATED_CMS_DETAIL |
 | Software Stack | $stack_status | $stack_detail |
 
 ## 6. Proactive Defence
 
 | Audit Item | Status | Details |
 |---|---|---|
-| /tmp Security | $TMP_SEC_STATUS | $TMP_SEC_DETAIL |
-| Reboot Procedure | $REBOOT_PROC_STATUS | $REBOOT_PROC_DETAIL |
-| IP RDNS | $RDNS_STATUS | $RDNS_DETAIL |
-| Malware Scan | $MALWARE_RESULT_STATUS | $MALWARE_RESULT_DETAIL |
-| Rootkit Check | $ROOTKIT_RESULT_STATUS | $ROOTKIT_RESULT_DETAIL |
-| Outdated CMS Check | $OUTDATED_CMS_STATUS | $OUTDATED_CMS_DETAIL |
-| SSH Root Access Security | $ROOT_LOGIN_STATUS | PermitRootLogin: $ROOT_LOGIN_RAW \| PasswordAuth: $SSH_PASSWORD_AUTH \| Port(s): $SSH_PORT |
-| PHP Functions Security | $PHP_FUNC_STATUS | $PHP_FUNC_DETAIL |
-| Root password health | $ROOT_PW_STATUS | Root password ~$DAYS_OLD days old (target: rotated within 90 days) |
+| /tmp Security | $(portal_status "$TMP_SEC_STATUS") | $TMP_SEC_DETAIL |
+| Reboot Procedure | $(portal_status "$REBOOT_PROC_STATUS") | $REBOOT_PROC_DETAIL |
+| IP RDNS | $(portal_status "$RDNS_STATUS") | $RDNS_DETAIL |
+| Malware Scan | $(portal_status "$MALWARE_RESULT_STATUS") | $MALWARE_RESULT_DETAIL |
+| Rootkit Check | $(portal_status "$ROOTKIT_RESULT_STATUS") | $ROOTKIT_RESULT_DETAIL |
+| Outdated CMS Check | $(portal_status "$OUTDATED_CMS_STATUS") | $OUTDATED_CMS_DETAIL |
+| SSH Root Access Security | $(portal_status "$ROOT_LOGIN_STATUS") | PermitRootLogin: $ROOT_LOGIN_RAW \| PasswordAuth: $SSH_PASSWORD_AUTH \| Port(s): $SSH_PORT |
+| PHP Functions Security | $(portal_status "$PHP_FUNC_STATUS") | $PHP_FUNC_DETAIL |
+| Root password health | $(portal_status "$ROOT_PW_STATUS") | Root password ~$DAYS_OLD days old (target: rotated within 90 days) |
 
 ---
 
@@ -1431,109 +1482,134 @@ Web Server Uptime : $HTTP_UPTIME
 
 | Check | Status | Details |
 |---|---|---|
-| Services | $SERVICES_STATUS | $SERVICES_DOWN |
-| SSL Certificates | $SSL_STATUS | $SSL_EXPIRY |
-| User Accounts | ðŸ”µ Info | Total: $ACCT_COUNT | Locked: $ACCT_SUSPENDED |
-| Malware Scan Setup | ðŸŸ¢ Setup Checked | $SECURITY_ACTIONS$([[ "$MALWARE_SCAN_STARTED" != "No" ]] && echo " Scan: $MALWARE_SCAN_STARTED") |
+| Services | $(portal_status "$SERVICES_STATUS") | $SERVICES_DOWN |
+| SSL Certificates | $(portal_status "$SSL_STATUS") | $SSL_EXPIRY |
+| User Accounts | N/A | Total: $ACCT_COUNT | Locked: $ACCT_SUSPENDED |
+| Malware Scan Setup | N/A | $SECURITY_ACTIONS Scan: $MALWARE_SCAN_STARTED |
 
-**Recommendation:** Review any ðŸŸ¡ yellow / ðŸ”´ red items above. Prioritise pending security updates, reboot if required, enable/verify backups, and investigate IP reputation if listed. Items marked ðŸ”µ Manual require a human check.
+**Recommendation:** Review all RED and CHECK items above. Prioritise pending security updates, reboot if required, enable or verify backups, and investigate IP reputation if listed. N/A items need a manual check where applicable.
 EOF
 }
 
 generate_detailed_log() {
     {
-        echo "DETAILED TECHNICAL LOG"
-        echo "======================"
-        echo "Generated: $(date)"
+        echo "============================================================="
+        echo " SYSTEM INFORMATION"
+        echo "============================================================="
+        printf '  %-38s : %s\n' "Hostname" "$HOSTNAME"
+        printf '  %-38s : %s\n' "Audit Date" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+        printf '  %-38s : %s\n' "OS" "$DISTRO_NAME"
+        printf '  %-38s : %s\n' "Kernel" "$KERNEL"
+        printf '  %-38s : %s\n' "Uptime" "$UPTIME"
+        printf '  %-38s : %s\n' "Primary IP" "$MAIN_IP"
         echo
-        echo "=== System Information ==="
-        echo "Hostname              : $HOSTNAME"
-        echo "Main IP               : $MAIN_IP"
-        echo "rDNS                  : $RDNS"
-        echo "OS / Version          : $OS_NAME $OS_VERSION ($EOL_STATUS)"
-        echo "Control Panel         : N/A"
-        echo "System Type           : $VM_STATUS"
-        echo "Kernel                : $KERNEL"
-        echo "System Uptime         : $UPTIME"
-        echo "Web Server Uptime     : $HTTP_UPTIME"
+        echo "============================================================="
+        echo " THREAT PROTECTION"
+        echo "============================================================="
+        report_item "System Firewall" "$SYSTEM_FIREWALL_STATUS" "$SYSTEM_FIREWALL_ANALYSIS"
+        report_item "Malware Scanner" "$MALWARE_SCANNER_STATUS" "$MALWARE_SCANNER_DETAIL"
+        report_item "Failed Login Detection" "$BRUTE_STATUS" "$BRUTE_REASON"
+        report_item "Web Application Firewall" "$MODSEC_STATUS" "$MODSEC_REASON"
+        report_item "Rootkit Scanner" "$ROOTKIT_SCANNER_STATUS" "$ROOTKIT_SCANNER_DETAIL"
         echo
-        echo "=== 1. Threat Protection ==="
-        echo "System Firewall        : $SYSTEM_FIREWALL_STATUS - $SYSTEM_FIREWALL_ANALYSIS"
-        echo "Malware Scanner        : $MALWARE_SCANNER_STATUS - $MALWARE_SCANNER_DETAIL"
-        echo "Failed Login Detection : $BRUTE_STATUS - $BRUTE_REASON"
-        echo "Web App Firewall       : $MODSEC_STATUS - $MODSEC_REASON"
-        echo "Rootkit Scanner        : $ROOTKIT_SCANNER_STATUS - $ROOTKIT_SCANNER_DETAIL"
-        echo "chkrootkit             : $(command -v chkrootkit 2>/dev/null || echo 'Not found')"
-        echo "rkhunter               : $(command -v rkhunter 2>/dev/null || echo 'Not found')"
-        echo "ClamAV                 : $(command -v clamscan >/dev/null 2>&1 && echo 'Present' || echo 'Not found')"
-        echo "Bobcares scripts       : $(ls /root/scripts/bobcares-malware-scan.sh /root/scripts/run-weekly-malware-scan.sh 2>/dev/null | wc -l) of 2 present"
-        echo "Cron job               : $([ -f /etc/cron.d/bc-malware-scan ] && echo 'Present' || echo 'Missing')"
-        echo "Whitelist file         : $([ -f /root/scripts/malware-whitelist.txt ] && echo 'Present' || echo 'Missing')"
-        echo "Setup actions          : $SECURITY_ACTIONS"
-        echo "Scan triggered         : $MALWARE_SCAN_STARTED"
+        echo "============================================================="
+        echo " SOFTWARE UPDATES"
+        echo "============================================================="
+        report_item "Control Panel" "N/A" "No control panel installed on this server"
+        report_item "Operating System / Kernel" "$SYSTEM_UPDATE_STATUS" "$SYSTEM_LATEST"
+        report_item "PHP" "$( [[ $PHP_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$PHP_UPDATE_COUNT pending update(s); installed: $PHP_VERSIONS; default: $PHP_DEFAULT"
+        report_item "CMS" "$OUTDATED_CMS_STATUS" "$OUTDATED_CMS_DETAIL"
+        report_item "Web Server" "$( [[ $HTTPD_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$HTTPD_UPDATE_COUNT pending web-server update(s)"
+        report_item "Database Server" "$( [[ $MYSQL_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$MYSQL_UPDATE_COUNT pending database update(s)"
+        report_item "Other Softwares" "$( [[ $OTHER_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$OTHER_UPDATE_COUNT other pending package(s)${OTHER_UPDATE_PKGS:+: $OTHER_UPDATE_PKGS}"
         echo
-        echo "=== 2. Software Updates ==="
-        echo "Package Manager        : ${PKG_MGR:-unknown}"
-        echo "OS packages pending    : $OS_UPDATE_COUNT"
-        echo "Security updates       : $SEC_UPDATE_COUNT"
-        echo "PHP pending            : $PHP_UPDATE_COUNT"
-        echo "httpd/apache pending   : $HTTPD_UPDATE_COUNT"
-        echo "MySQL/MariaDB pending  : $MYSQL_UPDATE_COUNT"
-        echo "Other pending          : $OTHER_UPDATE_COUNT ${OTHER_UPDATE_PKGS:+($OTHER_UPDATE_PKGS)}"
-        echo "System Packages        : $SYSTEM_UPDATE_STATUS ($SYSTEM_LATEST)"
-        echo "Running kernel         : $KERNEL_RUNNING"
-        echo "Kernel environment     : $KERNEL_ENV"
-        echo "Kernel update in repo  : $KERNEL_UPDATE_AVAILABLE"
-        echo "Kernel analysis        : $KERNEL_ANALYSIS"
-        echo "KernelCare             : $KC_STATUS"
-        echo "KernelCare effective   : ${KC_EFFECTIVE:-N/A}"
-        echo "Reboot required        : $REBOOT_REQUIRED ($REBOOT_REASON)"
-        echo "Services to restart    : ${SVC_RESTART_COUNT:-0} - ${SVC_RESTART_LIST:-none}"
+        echo "============================================================="
+        echo " SERVER HEALTH"
+        echo "============================================================="
+        report_item "Server Uptime" "$UPTIME_STATUS" "$UPTIME"
+        report_item "HTTP Uptime" "$HTTP_STATUS" "$HTTP_UPTIME"
+        report_item "CPU Usage" "$CPU_STATUS" "Load average: $LOAD"
+        report_item "RAM Usage" "$RAM_STATUS" "${RAM_PCT}% used"
+        report_item "Disk Space Usage" "$DISK_STATUS" "${DISK_PCT}% used"
+        report_item "Email Queue" "$EMAIL_STATUS" "Queued messages: $EMAIL_QUEUE"
+        report_item "IP Reputation" "$IP_REPUTATION_STATUS" "$IP_REPUTATION_DETAIL"
         echo
-        echo "=== 3. Server Health ==="
-        echo "Server Uptime    : $UPTIME_STATUS ($UPTIME)"
-        echo "HTTP Uptime      : $HTTP_STATUS ($HTTP_UPTIME)"
-        echo "CPU Usage        : $CPU_STATUS (Load: $LOAD)"
-        echo "RAM Usage        : $RAM_STATUS (${RAM_PCT}%)"
-        echo "Disk Usage       : $DISK_STATUS (${DISK_PCT}%)"
-        echo "Email Queue      : $EMAIL_STATUS (Queued: $EMAIL_QUEUE)"
-        echo "IP Reputation    : $IP_REPUTATION_STATUS - $IP_REPUTATION_DETAIL"
+        echo "============================================================="
+        echo " BACKUP"
+        echo "============================================================="
+        report_item "Local Backup" "$BACKUP_STATUS" "$BACKUP_DETAIL"
+        report_item "Remote Backup" "$BACKUP_REMOTE_STATUS" "$BACKUP_REMOTE_DETAIL"
+        report_item "Daily Backup" "$BACKUP_DAILY_STATUS" "$BACKUP_DAILY_DETAIL"
+        report_item "Weekly Backup" "$BACKUP_WEEKLY_STATUS" "$BACKUP_WEEKLY_DETAIL"
+        report_item "Monthly Backup" "$BACKUP_MONTHLY_STATUS" "$BACKUP_MONTHLY_DETAIL"
+        report_item "Backup Retention" "$BACKUP_RETENTION_STATUS" "$BACKUP_RETENTION_DETAIL"
+        report_item "Recent Last Backup" "$BACKUP_LAST_STATUS" "$BACKUP_LAST_DETAIL"
+        report_item "Size Of Last Backup" "$BACKUP_SIZE_STATUS" "$BACKUP_SIZE_DETAIL"
         echo
-        echo "=== 4. Backup ==="
-        echo "Local Backup        : $BACKUP_STATUS - $BACKUP_DETAIL"
-        echo "Remote Backup       : $BACKUP_REMOTE_STATUS - $BACKUP_REMOTE_DETAIL"
-        echo "Daily Backup        : $BACKUP_DAILY_STATUS - $BACKUP_DAILY_DETAIL"
-        echo "Weekly Backup       : $BACKUP_WEEKLY_STATUS - $BACKUP_WEEKLY_DETAIL"
-        echo "Monthly Backup      : $BACKUP_MONTHLY_STATUS - $BACKUP_MONTHLY_DETAIL"
-        echo "Recent Last Backup  : $BACKUP_LAST_STATUS - $BACKUP_LAST_DETAIL"
-        echo "Size Of Last Backup : $BACKUP_SIZE_STATUS - $BACKUP_SIZE_DETAIL"
+        echo "============================================================="
+        echo " SOFTWARE LIFE TIME"
+        echo "============================================================="
+        report_item "Control Panel" "N/A" "No control panel installed on this server"
+        report_item "Operating System" "$EOL_STATUS" "$DISTRO_NAME"
+        report_item "PHP Lifetime" "$PHP_EOL_STATUS" "$PHP_EOL_DETAIL"
+        report_item "CMS Lifetime" "$OUTDATED_CMS_STATUS" "$OUTDATED_CMS_DETAIL"
+        report_item "Software Stack" "$KERNEL_STATUS" "Kernel: $KERNEL_RUNNING; KernelCare: $KC_STATUS"
         echo
-        echo "=== 5. Software Life Time ==="
-        echo "Operating System : $OS_NAME $OS_VERSION - $EOL_STATUS"
-        echo "Software Updates : $SYSTEM_UPDATE_STATUS ($SYSTEM_LATEST)"
-        echo "PHP EOL          : $PHP_EOL_STATUS - $PHP_EOL_DETAIL"
-        echo "CMS              : Manual check required"
-        echo
-        echo "=== 6. Proactive Defence ==="
-        echo "/tmp noexec      : $TMP_SEC ($TMP_SEC_STATUS)"
-        echo "Reboot Procedure : $REBOOT_PROC_STATUS - $REBOOT_PROC_DETAIL"
-        echo "IP RDNS          : $RDNS_STATUS - $RDNS_DETAIL"
-        echo "Malware Scan     : $MALWARE_RESULT_STATUS - $MALWARE_RESULT_DETAIL"
-        echo "Rootkit Check    : $ROOTKIT_RESULT_STATUS - $ROOTKIT_RESULT_DETAIL"
-        echo "Outdated CMS     : $OUTDATED_CMS_STATUS - $OUTDATED_CMS_DETAIL"
-        echo "SSH Root Login   : $ROOT_LOGIN_STATUS ($ROOT_LOGIN_RAW)"
-        echo "SSH Password Auth: $SSH_PASSAUTH_STATUS ($SSH_PASSWORD_AUTH)"
-        echo "SSH Port(s)      : $SSH_PORT"
-        echo "PHP Functions    : $PHP_FUNC_STATUS - $PHP_FUNC_DETAIL"
-        echo "Root Password    : $ROOT_PW_STATUS (~$DAYS_OLD days old)"
-        echo
-        echo "=== Additional System Checks ==="
-        echo "PHP versions      : $PHP_VERSIONS"
-        echo "PHP default       : $PHP_DEFAULT"
-        echo "Accounts total    : $ACCT_COUNT (locked: $ACCT_SUSPENDED)"
-        echo "Services down     : $SERVICES_DOWN"
-        echo "SSL expiring <30d : $SSL_EXPIRING_COUNT - $SSL_EXPIRING_LIST"
-    } | tee "$DETAILED_FILE"
+        echo "============================================================="
+        echo " PROACTIVE DEFENCE"
+        echo "============================================================="
+        report_item "/tmp Security" "$TMP_SEC_STATUS" "$TMP_SEC_DETAIL"
+        report_item "Reboot Procedure" "$REBOOT_PROC_STATUS" "$REBOOT_PROC_DETAIL"
+        report_item "IP RDNS" "$RDNS_STATUS" "$RDNS_DETAIL"
+        report_item "Malware Scan" "$MALWARE_RESULT_STATUS" "$MALWARE_RESULT_DETAIL"
+        report_item "Rootkit Check" "$ROOTKIT_RESULT_STATUS" "$ROOTKIT_RESULT_DETAIL"
+        report_item "Outdated CMS" "$OUTDATED_CMS_STATUS" "$OUTDATED_CMS_DETAIL"
+        report_item "SSH Root Access Security" "$ROOT_LOGIN_STATUS" "PermitRootLogin: $ROOT_LOGIN_RAW; PasswordAuth: $SSH_PASSWORD_AUTH; port(s): $SSH_PORT"
+        report_item "PHP Functions Security" "$PHP_FUNC_STATUS" "$PHP_FUNC_DETAIL"
+        report_item "Root Password Health" "$ROOT_PW_STATUS" "Changed approximately $DAYS_OLD day(s) ago"
+    } > "$DETAILED_FILE"
+
+    colorize_report < "$DETAILED_FILE"
+}
+
+generate_findings_log() {
+    # Itemised hand-off log: retain each package/report entry under its category.
+    findings_section() {
+        local title="$1" entries="$2"
+        printf '\n=============================================================\n%s\n=============================================================\n' "$title"
+        if [[ -n "$entries" ]]; then
+            printf '%s\n' "$entries"
+        else
+            echo "None"
+        fi
+    }
+
+    {
+        cat << EOF
+BOBCARES AUDIT FINDINGS
+Generated : $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+Hostname  : $HOSTNAME
+Main IP   : $MAIN_IP
+EOF
+        findings_section "ALL PACKAGE UPDATES ($OS_UPDATE_COUNT)" "$UPDATE_ALL_LIST"
+        findings_section "OPERATING SYSTEM / KERNEL UPDATES (${KERNEL_UPDATE_COUNT:-0})" "$KERNEL_UPDATE_LIST"
+        findings_section "PHP UPDATES ($PHP_UPDATE_COUNT)" "$PHP_UPDATE_LIST"
+        findings_section "WEB SERVER UPDATES ($HTTPD_UPDATE_COUNT)" "$HTTPD_UPDATE_LIST"
+        findings_section "DATABASE UPDATES ($MYSQL_UPDATE_COUNT)" "$MYSQL_UPDATE_LIST"
+        findings_section "OTHER SOFTWARE UPDATES ($OTHER_UPDATE_COUNT)" "$OTHER_UPDATE_LIST"
+        findings_section "MALWARE SCAN ($(portal_status "$MALWARE_RESULT_STATUS"))" "$MALWARE_RESULT_DETAIL"
+        if [[ -f /root/scripts/malware-details-report.txt ]]; then
+            findings_section "MALWARE REPORT ENTRIES" "$(grep '^File: ' /root/scripts/malware-details-report.txt 2>/dev/null || true)"
+        elif [[ -f /root/scripts/malware-files.txt ]]; then
+            findings_section "MALWARE REPORT ENTRIES" "$(grep -vE '^[[:space:]]*(#|$)' /root/scripts/malware-files.txt 2>/dev/null || true)"
+        fi
+        findings_section "ROOTKIT CHECK ($(portal_status "$ROOTKIT_RESULT_STATUS"))" "$ROOTKIT_RESULT_DETAIL"
+        if [[ -f /root/scripts/outdated-cms-report.txt ]]; then
+            findings_section "CMS UPDATE REPORT ($(portal_status "$OUTDATED_CMS_STATUS"))" "$(cat /root/scripts/outdated-cms-report.txt)"
+        else
+            findings_section "CMS UPDATE REPORT (N/A)" "$OUTDATED_CMS_DETAIL"
+        fi
+    } > "$FINDINGS_FILE"
 }
 
 #-------------------------------------------------------------------------------
@@ -1592,27 +1668,17 @@ main() {
 
     check_resource_usage
 
-    MALWARE_SCAN_STARTED="No"
-    if [[ "$MALWARE_SCRIPT_FRESHLY_INSTALLED" == "yes" ]] || [ ! -f /root/scripts/malware-scan-report.txt ]; then
-        if [ -x /root/scripts/bobcares-malware-scan.sh ] && command -v screen >/dev/null 2>&1; then
-            echo
-            echo "-> Starting Bobcares malware scan in background screen session..."
-            screen -S bobcares-malware-scan -X quit >/dev/null 2>&1 || true
-            screen -dmS bobcares-malware-scan /root/scripts/bobcares-malware-scan.sh
-            MALWARE_SCAN_STARTED="Yes (screen: bobcares-malware-scan)"
-            echo "OK Started. Attach with: screen -r bobcares-malware-scan"
-            echo
-        else
-            MALWARE_SCAN_STARTED="No (script or screen missing)"
-        fi
-    fi
+    # This audit is deliberately read-only: it never installs tools or starts scans.
+    MALWARE_SCAN_STARTED="No (read-only audit)"
     export MALWARE_SCAN_STARTED
 
+    generate_findings_log
     generate_smart_summary
     generate_detailed_log
 
     echo
     echo "Audit Complete!"
+    echo "Findings Log  : $FINDINGS_FILE"
     echo "Smart Summary : $SUMMARY_FILE"
     echo "Detailed Log  : $DETAILED_FILE"
     echo "Debug Log     : $DEBUG_LOG"
