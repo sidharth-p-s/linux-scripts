@@ -1553,9 +1553,9 @@ generate_detailed_log() {
         echo "============================================================="
         report_item "Control Panel" "N/A" "No control panel installed on this server"
         report_item "Operating System" "$EOL_STATUS" "$DISTRO_NAME"
-        report_item "PHP Lifetime" "$PHP_EOL_STATUS" "$PHP_EOL_DETAIL"
+        report_item "Software Stack" "$PHP_EOL_STATUS" "$PHP_EOL_DETAIL"
         report_item "CMS Lifetime" "$OUTDATED_CMS_STATUS" "$OUTDATED_CMS_DETAIL"
-        report_item "Software Stack" "$KERNEL_STATUS" "Kernel: $KERNEL_RUNNING; KernelCare: $KC_STATUS"
+        #report_item "Kernel Status" "$KERNEL_STATUS" "Kernel: $KERNEL_RUNNING; KernelCare: $KC_STATUS"
         echo
         echo "============================================================="
         echo " PROACTIVE DEFENCE"
