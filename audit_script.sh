@@ -10,12 +10,14 @@
 #     PHP EOL versions, malware scan results, rootkit scan results,
 #     rDNS status, reboot procedure info
 #===============================================================================
+SCRIPT_DIR="/root/scripts"
 
+mkdir -p "$SCRIPT_DIR"
 
-SUMMARY_FILE="audit-smart-summary.md"
-DETAILED_FILE="report-detailed.log"
-FINDINGS_FILE="audit-findings.log"
-DEBUG_LOG="audit-debug.log"
+SUMMARY_FILE="$SCRIPT_DIR/audit-smart-summary.md"
+DETAILED_FILE="$SCRIPT_DIR/report-detailed.log"
+FINDINGS_FILE="$SCRIPT_DIR/audit-findings.log"
+DEBUG_LOG="$SCRIPT_DIR/audit-debug.log"
 
 STATE_DIR=$(mktemp -d /tmp/bc-audit.XXXXXX)
 trap 'rm -rf "$STATE_DIR"' EXIT
@@ -1682,6 +1684,12 @@ main() {
     echo "Smart Summary : $SUMMARY_FILE"
     echo "Detailed Log  : $DETAILED_FILE"
     echo "Debug Log     : $DEBUG_LOG"
+
+    echo "Please find the audit report files in /root/scripts/ for review and submission to the Bobcares portal."
+    echo "All updates and malware scan results are read-only and require manual intervention to resolve."
+    echo "Backup results are based on detected cron jobs and backup directories; please verify manually if needed."
+    echo "External DC backups and offsite backups are not verified by this audit; please ensure they are checked manually."
+    echo "If malware scan is not configured, please set up a malware scanner and run a full scan to ensure server integrity."
 }
 
 main "$@"
