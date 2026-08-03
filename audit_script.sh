@@ -242,15 +242,12 @@ check_rdns() {
         r=$(nslookup "$ip" 2>/dev/null | awk -F'= ' '/name =/ {print $2}' | sed 's/\.$//')
 
     else
-        RDNS="UNKNOWN"
-        export RDNS
+        save_state_file "rdns.env" RDNS "UNKNOWN"
         return
     fi
 
     [[ -z "$r" ]] && r="None"
-
-    RDNS="$r"
-    export RDNS
+    save_state_file "rdns.env" RDNS "$r"
 }
 
 #-------------------------------------------------------------------------------
