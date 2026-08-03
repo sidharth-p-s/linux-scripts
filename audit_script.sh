@@ -807,7 +807,8 @@ check_package_updates() {
         if [[ "$PKG_MGR" == "dnf" ]]; then
             SEC_UPDATE_COUNT=$(dnf updateinfo list security --quiet 2>/dev/null | grep -cE '^\S+\s+\S+\s+\S+' || echo 0)
         else
-            SEC_UPDATE_COUNT=$(yum --security check-update --quiet 2>/dev/null | grep -cE '^\S+\.\S+\s+\S+\s+\S+' || echo 0)
+            SEC_UPDATE_COUNT=$(yum --security check-update --quiet 2>/dev/null | grep -cE '^\S+\.\S+\s+\S+\s+\S+' 2>/dev/null)
+            SEC_UPDATE_COUNT=${SEC_UPDATE_COUNT:-0}
         fi
 
     elif [[ "$PKG_MGR" == "apt" ]]; then
