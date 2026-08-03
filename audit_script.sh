@@ -1307,6 +1307,10 @@ check_rdns_status() {
     export RDNS_STATUS RDNS_DETAIL
 }
 
+echo "[DEBUG] RDNS='$RDNS'"
+echo "[DEBUG] RDNS_STATUS='$RDNS_STATUS'"
+echo "[DEBUG] RDNS_DETAIL='$RDNS_DETAIL'"
+
 check_reboot_procedure_info() {
     REBOOT_PROC_STATUS="ðŸ”µ Manual"
     if [[ "$VM_STATUS" == Physical* ]]; then
