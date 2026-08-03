@@ -527,7 +527,8 @@ check_malware_scan_results() {
 
         # Count actual malware entries (the new individual report uses "File: /path" lines)
         local malware_count
-        malware_count=$(grep -c '^File: ' "$report" 2>/dev/null || echo 0)
+        malware_count=$(grep -c '^File: ' "$report" 2>/dev/null)
+        [[ "$malware_count" =~ ^[0-9]+$ ]] || malware_count=0
 
         local age_days
         age_days=$(( ($(date +%s) - $(stat -c %Y "$report" 2>/dev/null || date +%s)) / 86400 ))
@@ -805,7 +806,8 @@ check_package_updates() {
         fi
 
         if [[ "$PKG_MGR" == "dnf" ]]; then
-            SEC_UPDATE_COUNT=$(dnf updateinfo list security --quiet 2>/dev/null | grep -cE '^\S+\s+\S+\s+\S+' || echo 0)
+            SEC_UPDATE_COUNT=$(dnf updateinfo list security --quiet 2>/dev/null | grep -cE '^\S+\s+\S+\s+\S+' 2>/dev/null)
+            SEC_UPDATE_COUNT=${SEC_UPDATE_COUNT:-0}
         else
             SEC_UPDATE_COUNT=$(yum --security check-update --quiet 2>/dev/null | grep -cE '^\S+\.\S+\s+\S+\s+\S+' 2>/dev/null)
             SEC_UPDATE_COUNT=${SEC_UPDATE_COUNT:-0}
