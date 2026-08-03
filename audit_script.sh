@@ -1685,11 +1685,26 @@ main() {
     echo "Detailed Log  : $DETAILED_FILE"
     echo "Debug Log     : $DEBUG_LOG"
 
-    echo "Please find the audit report files in /root/scripts/ for review and submission to the Bobcares portal."
-    echo "All updates and malware scan results are read-only and require manual intervention to resolve."
-    echo "Backup results are based on detected cron jobs and backup directories; please verify manually if needed."
-    echo "External DC backups and offsite backups are not verified by this audit; please ensure they are checked manually."
-    echo "If malware scan is not configured, please set up a malware scanner and run a full scan to ensure server integrity."
+    echo
+    echo "===================== AUDIT SUMMARY ====================="
+    echo
+    echo "[INFO]    Audit report files are available in:"
+    echo "          /root/scripts/"
+    echo "          Please review them before submitting to the Bobcares portal."
+    echo
+    echo "[WARNING] System updates and malware scan results are read-only."
+    echo "          Any issues found require manual intervention."
+    echo
+    echo "[WARNING] Backup status is based only on detected cron jobs and"
+    echo "          backup directories. Please verify backup integrity manually."
+    echo
+    echo "[WARNING] External DC and offsite backups are NOT verified"
+    echo "          by this audit. Please validate them separately."
+    echo
+    echo "[ACTION]  If no malware scanner is configured, install one"
+    echo "          and perform a full malware scan."
+    echo
+    echo "========================================================="
 }
 
 main "$@"
