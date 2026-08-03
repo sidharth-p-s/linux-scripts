@@ -232,25 +232,25 @@ check_rdns() {
     local ip="$1"
     local r=""
 
-    # Try dig first
     if command -v dig >/dev/null 2>&1; then
         r=$(dig -x "$ip" +short 2>/dev/null | sed 's/\.$//' | head -1)
 
-    # Fall back to host
     elif command -v host >/dev/null 2>&1; then
         r=$(host "$ip" 2>/dev/null | awk '/pointer/ {print $NF}' | sed 's/\.$//')
 
-    # Fall back to nslookup
     elif command -v nslookup >/dev/null 2>&1; then
         r=$(nslookup "$ip" 2>/dev/null | awk -F'= ' '/name =/ {print $2}' | sed 's/\.$//')
+
+    else
+        RDNS="UNKNOWN"
+        export RDNS
+        return
     fi
 
-    # No lookup tool available
-    if [[ -z "$r" ]]; then
-        r="None"
-    fi
+    [[ -z "$r" ]] && r="None"
 
-    save_state_file "rdns.env" RDNS "$r"
+    RDNS="$r"
+    export RDNS
 }
 
 #-------------------------------------------------------------------------------
@@ -1296,11 +1296,17 @@ check_php_functions_security() {
 #-------------------------------------------------------------------------------
 
 check_rdns_status() {
-    if [[ -n "$RDNS" && "$RDNS" != "None" ]]; then
-        RDNS_STATUS="ðŸŸ¢ Good"; RDNS_DETAIL="PTR record: $RDNS"
+    if [[ "$RDNS" == "UNKNOWN" ]]; then
+        RDNS_STATUS="N/A"
+        RDNS_DETAIL="Unable to verify (dig/host/nslookup not installed)"
+    elif [[ -n "$RDNS" && "$RDNS" != "None" ]]; then
+        RDNS_STATUS="GREEN"
+        RDNS_DETAIL="PTR record: $RDNS"
     else
-        RDNS_STATUS="ðŸŸ¡ Missing"; RDNS_DETAIL="No PTR record for $MAIN_IP - may affect email delivery"
+        RDNS_STATUS="RED"
+        RDNS_DETAIL="No PTR record for $MAIN_IP - may affect email delivery"
     fi
+
     export RDNS_STATUS RDNS_DETAIL
 }
 
