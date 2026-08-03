@@ -229,9 +229,27 @@ get_public_ip() {
 }
 
 check_rdns() {
-    local ip="$1" r
-    r=$(dig @8.8.8.8 +time=3 +tries=1 -x "$ip" +short 2>/dev/null | sed 's/\.$//' | head -1)
-    [[ -z "$r" ]] && r="None"
+    local ip="$1"
+    local r=""
+
+    # Try dig first
+    if command -v dig >/dev/null 2>&1; then
+        r=$(dig -x "$ip" +short 2>/dev/null | sed 's/\.$//' | head -1)
+
+    # Fall back to host
+    elif command -v host >/dev/null 2>&1; then
+        r=$(host "$ip" 2>/dev/null | awk '/pointer/ {print $NF}' | sed 's/\.$//')
+
+    # Fall back to nslookup
+    elif command -v nslookup >/dev/null 2>&1; then
+        r=$(nslookup "$ip" 2>/dev/null | awk -F'= ' '/name =/ {print $2}' | sed 's/\.$//')
+    fi
+
+    # No lookup tool available
+    if [[ -z "$r" ]]; then
+        r="None"
+    fi
+
     save_state_file "rdns.env" RDNS "$r"
 }
 
