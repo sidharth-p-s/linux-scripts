@@ -576,7 +576,8 @@ check_malware_scan_results() {
 
         # Count lines that indicate outdated packages (PHPMailer, WordPress, Joomla, etc.)
         local outdated_count
-        outdated_count=$(grep -cE '^(PHPMailer|WordPress|Joomla|Drupal|Magento|PrestaShop|OpenCart|Shopify|WooCommerce)' "$cms_report" 2>/dev/null || echo 0)
+        outdated_count=$(grep -cE '^(PHPMailer|WordPress|Joomla|Drupal|Magento|PrestaShop|OpenCart|Shopify|WooCommerce)' "$cms_report" 2>/dev/null)
+        [[ "$outdated_count" =~ ^[0-9]+$ ]] || outdated_count=0
 
         if [[ $outdated_count -eq 0 ]]; then
             OUTDATED_CMS_STATUS="ðŸŸ¢ Good"
