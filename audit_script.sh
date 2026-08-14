@@ -403,14 +403,135 @@ collect_system_info() {
     RAM_PCT=$(free | awk '/Mem:/ {print int($3/$2*100)}')
     DISK_PCT=$(df -P / | awk 'NR==2 {gsub("%","",$5); print $5}')
 
-    local web_server_proc
-    web_server_proc=$(pgrep -o -x 'httpd|apache2|nginx|lshttpd' 2>/dev/null)
-    if [[ -n "$web_server_proc" ]]; then
-        HTTP_UPTIME=$(ps -p "$web_server_proc" -o etime= 2>/dev/null | xargs)
-        HTTP_STATUS="Running"
+    # Detect web server status via systemctl & process check
+    local _found_svc="" _found_name="" _ws_state=""
+    local _svc_order=("lsws" "openlitespeed" "httpd" "apache2" "nginx" "caddy" "lighttpd")
+
+    # Helper to format raw ps etime into human-readable format
+    format_etime() {
+        local raw="$1"
+        [[ -z "$raw" ]] && return
+        if [[ "$raw" =~ ^([0-9]+)-([0-9]+):([0-9]+):([0-9]+)$ ]]; then
+            echo "${BASH_REMATCH[1]}d ${BASH_REMATCH[2]}h ${BASH_REMATCH[3]}m"
+        elif [[ "$raw" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]]; then
+            echo "${BASH_REMATCH[1]}h ${BASH_REMATCH[2]}m"
+        elif [[ "$raw" =~ ^([0-9]+):([0-9]+)$ ]]; then
+            echo "${BASH_REMATCH[1]}m"
+        else
+            echo "$raw"
+        fi
+    }
+
+    # Pass 1: Look for ACTIVE services first
+    for _svc in "${_svc_order[@]}"; do
+        if systemctl is-active --quiet "$_svc" 2>/dev/null; then
+            _found_svc="$_svc"
+            _ws_state="active"
+            break
+        fi
+    done
+
+    # Pass 2: If no active service found, check for FAILED services
+    if [[ -z "$_found_svc" ]]; then
+        for _svc in "${_svc_order[@]}"; do
+            if [[ "$(systemctl is-active "$_svc" 2>/dev/null)" == "failed" ]]; then
+                _found_svc="$_svc"
+                _ws_state="failed"
+                break
+            fi
+        done
+    fi
+
+    # Pass 3: If systemctl didn't match an active/failed unit, check for active processes (pgrep)
+    local _proc="" _proc_name=""
+    if [[ -z "$_found_svc" ]]; then
+        for _pn in lshttpd litespeed httpd apache2 nginx caddy lighttpd; do
+            _proc=$(pgrep -o -x "$_pn" 2>/dev/null)
+            if [[ -n "$_proc" ]]; then
+                _proc_name="$_pn"
+                _ws_state="active_process"
+                break
+            fi
+        done
+    fi
+
+    # Pass 4: If still nothing active/failed/running process, check for stopped (inactive) service unit
+    if [[ -z "$_found_svc" && -z "$_proc" ]]; then
+        for _svc in "${_svc_order[@]}"; do
+            if systemctl cat "$_svc" &>/dev/null; then
+                _found_svc="$_svc"
+                _ws_state="inactive"
+                break
+            fi
+        done
+    fi
+
+    # Determine display name
+    local display_svc="${_found_svc:-$_proc_name}"
+    case "$display_svc" in
+        lsws|lshttpd|litespeed) _found_name="LiteSpeed" ;;
+        openlitespeed)          _found_name="OpenLiteSpeed" ;;
+        apache2|httpd)          _found_name="Apache" ;;
+        nginx)                  _found_name="Nginx" ;;
+        caddy)                  _found_name="Caddy" ;;
+        lighttpd)               _found_name="lighttpd" ;;
+        *)                      _found_name="${display_svc:-Web Server}" ;;
+    esac
+
+    # Calculate status and uptime based on state
+    if [[ "$_ws_state" == "active" ]]; then
+        local svc_start svc_elapsed=""
+        svc_start=$(systemctl show "$_found_svc" --property=ActiveEnterTimestamp 2>/dev/null | awk -F= '{print $2}' | xargs)
+        if [[ -n "$svc_start" && "$svc_start" != "n/a" ]]; then
+            local svc_epoch elapsed_sec d h m
+            svc_epoch=$(date -d "$svc_start" +%s 2>/dev/null)
+            if [[ -n "$svc_epoch" && "$svc_epoch" -gt 0 ]]; then
+                elapsed_sec=$(( $(date +%s) - svc_epoch ))
+                d=$(( elapsed_sec / 86400 ))
+                h=$(( (elapsed_sec % 86400) / 3600 ))
+                m=$(( (elapsed_sec % 3600) / 60 ))
+                if (( d > 0 )); then
+                    svc_elapsed="${d}d ${h}h ${m}m"
+                elif (( h > 0 )); then
+                    svc_elapsed="${h}h ${m}m"
+                else
+                    svc_elapsed="${m}m"
+                fi
+            fi
+        fi
+
+        # Fallback to main process or pgrep process etime if ActiveEnterTimestamp is blank
+        if [[ -z "$svc_elapsed" ]]; then
+            local p_pid=""
+            p_pid=$(systemctl show "$_found_svc" --property=MainPID 2>/dev/null | awk -F= '{print $2}')
+            [[ -z "$p_pid" || "$p_pid" == "0" ]] && p_pid=$(pgrep -o -x "lshttpd|litespeed|httpd|apache2|nginx|caddy|lighttpd" 2>/dev/null)
+            if [[ -n "$p_pid" && "$p_pid" != "0" ]]; then
+                svc_elapsed=$(format_etime "$(ps -p "$p_pid" -o etime= 2>/dev/null | xargs)")
+            fi
+        fi
+
+        HTTP_UPTIME="${svc_elapsed:-Running}"
+        HTTP_STATUS="Running ($_found_name)"
+
+    elif [[ "$_ws_state" == "active_process" ]]; then
+        local raw_et
+        raw_et=$(ps -p "$_proc" -o etime= 2>/dev/null | xargs)
+        HTTP_UPTIME="$(format_etime "$raw_et")"
+        HTTP_STATUS="Running ($_found_name)"
+
+    elif [[ "$_ws_state" == "failed" ]]; then
+        local fail_reason
+        fail_reason=$(systemctl show "$_found_svc" --property=Result 2>/dev/null | awk -F= '{print $2}')
+        HTTP_UPTIME="N/A"
+        HTTP_STATUS="FAILED ($_found_name - ${fail_reason:-check logs})"
+
+    elif [[ "$_ws_state" == "inactive" ]]; then
+        HTTP_UPTIME="N/A"
+        HTTP_STATUS="Stopped ($_found_name)"
+
     else
-        HTTP_UPTIME="Not running"
-        HTTP_STATUS="Down"
+        HTTP_UPTIME="N/A"
+        HTTP_STATUS="Not detected"
     fi
 
     UPTIME_STATUS="Good"
@@ -495,8 +616,22 @@ check_ssh_config() {
 }
 
 check_system_firewall() {
-    if csf -l &>/dev/null || systemctl is-active --quiet firewalld 2>/dev/null || systemctl is-active --quiet ufw 2>/dev/null; then
-        SYSTEM_FIREWALL_STATUS="Good"; SYSTEM_FIREWALL_ANALYSIS="Active"
+    local fw_active="no" fw_name=""
+
+    if command -v csf >/dev/null 2>&1 && csf -l &>/dev/null; then
+        fw_active="yes"; fw_name="CSF"
+    elif systemctl is-active --quiet firewalld 2>/dev/null; then
+        fw_active="yes"; fw_name="firewalld"
+    elif systemctl is-active --quiet ufw 2>/dev/null; then
+        fw_active="yes"; fw_name="ufw"
+    elif iptables -n -L INPUT 2>/dev/null | grep -qvE '^(Chain|target|$)'; then
+        fw_active="yes"; fw_name="iptables"
+    elif systemctl is-active --quiet ipfw 2>/dev/null; then
+        fw_active="yes"; fw_name="ipfw"
+    fi
+
+    if [[ "$fw_active" == "yes" ]]; then
+        SYSTEM_FIREWALL_STATUS="Good"; SYSTEM_FIREWALL_ANALYSIS="Active ($fw_name)"
     else
         SYSTEM_FIREWALL_STATUS="Missing"; SYSTEM_FIREWALL_ANALYSIS="No active firewall detected; enable CSF, firewalld, or ufw"
     fi
@@ -515,6 +650,12 @@ check_brute_force_protection() {
         local jails
         jails=$(fail2ban-client status 2>/dev/null | awk -F: '/Jail list/{print $2}' | xargs)
         BRUTE_STATUS="Good"; BRUTE_REASON="Fail2Ban active${jails:+ (jails: $jails)}"
+    elif command -v cscli >/dev/null 2>&1 && systemctl is-active --quiet crowdsec 2>/dev/null; then
+        BRUTE_STATUS="Good"; BRUTE_REASON="CrowdSec active"
+    elif systemctl is-active --quiet sshguard 2>/dev/null || command -v sshguard >/dev/null 2>&1; then
+        BRUTE_STATUS="Good"; BRUTE_REASON="SSHGuard active"
+    elif systemctl is-active --quiet denyhosts 2>/dev/null || { [ -f /etc/hosts.deny ] && grep -qs 'sshd' /etc/hosts.deny 2>/dev/null; }; then
+        BRUTE_STATUS="Good"; BRUTE_REASON="DenyHosts active"
     fi
 
     export BRUTE_STATUS BRUTE_REASON
@@ -544,13 +685,13 @@ install_malware_cron() {
     echo "[INFO] ClamAV is installed but malware scan cron is missing. Auto-configuring /etc/cron.d/bc-malware-scan..."
     mkdir -p /root/scripts
 
-    curl -sS -m 15 -o /root/scripts/run-weekly-malware-scan.sh http://ims.bobcares.com/run-weekly-malware-scan.sh 2>/dev/null || \
+    curl -sSL -m 15 -o /root/scripts/run-weekly-malware-scan.sh http://ims.bobcares.com/run-weekly-malware-scan.sh 2>/dev/null || \
     wget -q -T 15 -O /root/scripts/run-weekly-malware-scan.sh http://ims.bobcares.com/run-weekly-malware-scan.sh 2>/dev/null
 
-    curl -sS -m 15 -o /root/scripts/bobcares-malware-scan.sh http://ims.bobcares.com/bobcares-malware-scan.sh 2>/dev/null || \
+    curl -sSL -m 15 -o /root/scripts/bobcares-malware-scan.sh http://ims.bobcares.com/bobcares-malware-scan.sh 2>/dev/null || \
     wget -q -T 15 -O /root/scripts/bobcares-malware-scan.sh http://ims.bobcares.com/bobcares-malware-scan.sh 2>/dev/null
 
-    curl -sS -m 15 -o /etc/cron.d/bc-malware-scan http://ims.bobcares.com/bc-malware-scan.txt 2>/dev/null || \
+    curl -sSL -m 15 -o /etc/cron.d/bc-malware-scan http://ims.bobcares.com/bc-malware-scan.txt 2>/dev/null || \
     wget -q -T 15 -O /etc/cron.d/bc-malware-scan http://ims.bobcares.com/bc-malware-scan.txt 2>/dev/null
 
     chmod 755 /root/scripts/run-weekly-malware-scan.sh /root/scripts/bobcares-malware-scan.sh 2>/dev/null
@@ -657,18 +798,27 @@ check_malware_scan_results() {
         fi
     fi
 
-    # Also parse the separate Outdated CMS report (produced by the same malware scan script)
+    # Also parse the Outdated CMS report (check dedicated file first, fallback to combined report)
     OUTDATED_CMS_STATUS="Unknown"
     OUTDATED_CMS_DETAIL="No CMS version report available"
 
     local cms_report="/root/scripts/outdated-cms-report.txt"
-    if [ -f "$cms_report" ]; then
-        local cdate
-        cdate=$(date -r "$cms_report" '+%Y-%m-%d %H:%M' 2>/dev/null)
+    local combined_report="/root/scripts/malware-scan-report.txt"
+    local active_cms_file=""
 
-        # Count lines that indicate outdated packages (PHPMailer, WordPress, Joomla, etc.)
+    if [ -f "$cms_report" ]; then
+        active_cms_file="$cms_report"
+    elif [ -f "$combined_report" ] && grep -qi "Outdated CMS" "$combined_report"; then
+        active_cms_file="$combined_report"
+    fi
+
+    if [ -n "$active_cms_file" ]; then
+        local cdate
+        cdate=$(date -r "$active_cms_file" '+%Y-%m-%d %H:%M' 2>/dev/null)
+
+        # Count lines that list CMS software (WordPress, Joomla, Drupal, etc.) with path/version info
         local outdated_count
-        outdated_count=$(grep -cE '^(PHPMailer|WordPress|Joomla|Drupal|Magento|PrestaShop|OpenCart|Shopify|WooCommerce)' "$cms_report" 2>/dev/null)
+        outdated_count=$(grep -E '^\s*(PHPMailer|WordPress|Joomla|Drupal|Magento|PrestaShop|OpenCart|Shopify|WooCommerce)[[:space:]]+[0-9]' "$active_cms_file" 2>/dev/null | wc -l)
         [[ "$outdated_count" =~ ^[0-9]+$ ]] || outdated_count=0
 
         if [[ $outdated_count -eq 0 ]]; then
@@ -920,12 +1070,12 @@ check_package_updates() {
         OS_UPDATE_COUNT=${#_pkg_updates[@]}
 
         if [[ $OS_UPDATE_COUNT -gt 0 ]]; then
-            PHP_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(ea-php|alt-php|php)' || true)
-            HTTPD_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(httpd|ea-apache24|nginx|openlitespeed|litespeed)' || true)
-            MYSQL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Eci '^(MariaDB-|mysql-|mariadb-|percona)' || true)
+            PHP_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(ea-php|alt-php|lsphp|rh-php|php)' || true)
+            HTTPD_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd)' || true)
+            MYSQL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Eci '^(MariaDB-|mysql|mariadb|percona|postgres|postgresql|mongodb|sqlite)' || true)
             KERNEL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(kernel|linux-firmware)' || true)
             OTHER_UPDATE_PKGS=$(printf '%s\n' "${_pkg_updates[@]}" \
-                | grep -Evi '^(ea-php|alt-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|MariaDB-|mysql-|mariadb-|percona|kernel|linux-firmware)' \
+                | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd|MariaDB-|mysql|mariadb|percona|postgres|postgresql|mongodb|sqlite|kernel|linux-firmware)' \
                 | awk -F. '{print $1}' | sort -u | paste -sd ', ' - | head -c 300)
         fi
 
@@ -943,13 +1093,13 @@ check_package_updates() {
         OS_UPDATE_COUNT=${#_pkg_updates[@]}
 
         if [[ $OS_UPDATE_COUNT -gt 0 ]]; then
-            PHP_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^php' || true)
-            HTTPD_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(apache2|httpd|nginx|openlitespeed|litespeed)' || true)
-            MYSQL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Eci '^(mariadb|mysql|percona)' || true)
+            PHP_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(ea-php|alt-php|lsphp|rh-php|php)' || true)
+            HTTPD_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(apache2|httpd|nginx|openlitespeed|litespeed|caddy|lighttpd)' || true)
+            MYSQL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Eci '^(mariadb|mysql|percona|postgres|postgresql|redis|mongodb|sqlite)' || true)
             KERNEL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^linux-(base|image|headers|modules|generic|tools|firmware)' || true)
             SEC_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -ci 'security' || true)
             OTHER_UPDATE_PKGS=$(printf '%s\n' "${_pkg_updates[@]}" \
-                | grep -Evi '^(php|apache2|httpd|nginx|openlitespeed|litespeed|mariadb|mysql|percona|linux-(base|image|headers|modules|generic|tools|firmware))' \
+                | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|apache2|httpd|nginx|openlitespeed|litespeed|caddy|lighttpd|mariadb|mysql|percona|postgres|postgresql|redis|mongodb|sqlite|linux-(base|image|headers|modules|generic|tools|firmware))' \
                 | awk -F/ '{print $1}' | sort -u | paste -sd ', ' - | head -c 300)
         fi
     fi
@@ -962,16 +1112,16 @@ check_package_updates() {
     UPDATE_ALL_LIST=$(printf '%s\n' "${_pkg_updates[@]}")
     if [[ "$PKG_MGR" == "apt" ]]; then
         KERNEL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^linux-(base|image|headers|modules|generic|tools|firmware)' || true)
-        PHP_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^php' || true)
-        HTTPD_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(apache2|httpd|nginx|openlitespeed|litespeed)' || true)
-        MYSQL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ei '^(mariadb|mysql|percona)' || true)
-        OTHER_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Evi '^(php|apache2|httpd|nginx|openlitespeed|litespeed|mariadb|mysql|percona|linux-(base|image|headers|modules|generic|tools|firmware))' || true)
+        PHP_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(ea-php|alt-php|lsphp|rh-php|php)' || true)
+        HTTPD_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(apache2|httpd|nginx|openlitespeed|litespeed|caddy|lighttpd)' || true)
+        MYSQL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ei '^(mariadb|mysql|percona|postgres|postgresql|redis|mongodb|sqlite)' || true)
+        OTHER_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|apache2|httpd|nginx|openlitespeed|litespeed|caddy|lighttpd|mariadb|mysql|percona|postgres|postgresql|redis|mongodb|sqlite|linux-(base|image|headers|modules|generic|tools|firmware))' || true)
     else
         KERNEL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(kernel|linux-firmware)' || true)
-        PHP_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(ea-php|alt-php|php)' || true)
-        HTTPD_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(httpd|ea-apache24|nginx|openlitespeed|litespeed)' || true)
-        MYSQL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ei '^(MariaDB-|mysql-|mariadb-|percona)' || true)
-        OTHER_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Evi '^(ea-php|alt-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|MariaDB-|mysql-|mariadb-|percona|kernel|linux-firmware)' || true)
+        PHP_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(ea-php|alt-php|lsphp|rh-php|php)' || true)
+        HTTPD_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd)' || true)
+        MYSQL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ei '^(MariaDB-|mysql|mariadb|percona|postgres|postgresql|redis|mongodb|sqlite)' || true)
+        OTHER_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd|MariaDB-|mysql|mariadb|percona|postgres|postgresql|redis|mongodb|sqlite|kernel|linux-firmware)' || true)
     fi
 
     export OS_UPDATE_COUNT SEC_UPDATE_COUNT PHP_UPDATE_COUNT HTTPD_UPDATE_COUNT MYSQL_UPDATE_COUNT KERNEL_UPDATE_COUNT OTHER_UPDATE_COUNT OTHER_UPDATE_PKGS \
@@ -994,24 +1144,46 @@ check_system_version() {
 }
 
 check_modsecurity() {
-    echo "[DEBUG] Checking ModSecurity..."
+    echo "[DEBUG] Checking Web Application Firewall (WAF)..."
     MODSEC_STATUS="Missing"
-    MODSEC_REASON="ModSecurity not detected"
+    MODSEC_REASON="No active Web Application Firewall (WAF) detected"
 
     local apache_conf=""
     local nginx_conf=""
     local module_loaded="no"
 
-    # Detect Apache
-    if command -v httpd >/dev/null 2>&1; then
-        apache_conf=$(httpd -V 2>/dev/null | awk -F'"' '/SERVER_CONFIG_FILE/{print $2}')
-        httpd -M 2>/dev/null | grep -qi security2_module && module_loaded="yes"
-    elif command -v apache2 >/dev/null 2>&1; then
-        apache_conf=$(apache2 -V 2>/dev/null | awk -F'"' '/SERVER_CONFIG_FILE/{print $2}')
-        apache2ctl -M 2>/dev/null | grep -qi security2_module && module_loaded="yes"
+    # 1. Imunify360 WebShield / WAF Check
+    if systemctl is-active --quiet imunify360-webshield 2>/dev/null || { command -v imunify360-agent >/dev/null 2>&1 && systemctl is-active --quiet imunify360 2>/dev/null; }; then
+        MODSEC_STATUS="Good"
+        MODSEC_REASON="Imunify360 WAF / WebShield active"
+        export MODSEC_STATUS MODSEC_REASON
+        return
     fi
 
-    # Detect Nginx + ModSecurity
+    # 2. BitNinja WAF Check
+    if systemctl is-active --quiet bitninja 2>/dev/null || command -v bitninjad >/dev/null 2>&1; then
+        MODSEC_STATUS="Good"
+        MODSEC_REASON="BitNinja WAF protection active"
+        export MODSEC_STATUS MODSEC_REASON
+        return
+    fi
+
+    # 3. LiteSpeed / OpenLiteSpeed WAF Check
+    if command -v /usr/local/lsws/bin/litespeed >/dev/null 2>&1 || pgrep -x "litespeed" >/dev/null 2>&1 || pgrep -x "openlitespeed" >/dev/null 2>&1; then
+        if [ -f /usr/local/lsws/conf/httpd_config.xml ] && grep -qE -i 'cpanel_wafs|modsecurity|SecRuleEngine' /usr/local/lsws/conf/httpd_config.xml 2>/dev/null; then
+            MODSEC_STATUS="Good"
+            MODSEC_REASON="LiteSpeed WAF / ModSecurity engine enabled"
+            export MODSEC_STATUS MODSEC_REASON
+            return
+        elif grep -Riq "SecRuleEngine[[:space:]]\+On" /etc/httpd /etc/apache2 /usr/local/apache/conf /etc/cwaf 2>/dev/null; then
+            MODSEC_STATUS="Good"
+            MODSEC_REASON="LiteSpeed WAF active with ModSecurity rules"
+            export MODSEC_STATUS MODSEC_REASON
+            return
+        fi
+    fi
+
+    # 4. Nginx + ModSecurity / NAXSI / Coraza Check
     if command -v nginx >/dev/null 2>&1; then
         nginx_conf=$(nginx -T 2>/dev/null)
 
@@ -1020,29 +1192,38 @@ check_modsecurity() {
             MODSEC_REASON="ModSecurity enabled for Nginx"
             export MODSEC_STATUS MODSEC_REASON
             return
+        elif echo "$nginx_conf" | grep -qiE 'coraza_rules|coraza_module'; then
+            MODSEC_STATUS="Good"
+            MODSEC_REASON="Coraza WAF enabled for Nginx"
+            export MODSEC_STATUS MODSEC_REASON
+            return
+        elif echo "$nginx_conf" | grep -qiE 'naxsi_main|SecRulesEnabled'; then
+            MODSEC_STATUS="Good"
+            MODSEC_REASON="NAXSI WAF enabled for Nginx"
+            export MODSEC_STATUS MODSEC_REASON
+            return
         fi
     fi
 
-    # Apache checks
+    # 5. Apache + ModSecurity Check
+    if command -v httpd >/dev/null 2>&1; then
+        httpd -M 2>/dev/null | grep -qiE 'security2_module|mod_security' && module_loaded="yes"
+    elif command -v apache2 >/dev/null 2>&1; then
+        apache2ctl -M 2>/dev/null | grep -qiE 'security2_module|mod_security' && module_loaded="yes"
+    fi
+
     if [[ "$module_loaded" == "yes" ]]; then
-
         if grep -Riq "SecRuleEngine[[:space:]]\+On" \
-            /etc/httpd /etc/apache2 /usr/local/apache/conf 2>/dev/null; then
-
+            /etc/httpd /etc/apache2 /usr/local/apache/conf /etc/cwaf 2>/dev/null; then
             MODSEC_STATUS="Good"
-            MODSEC_REASON="ModSecurity enabled"
-
+            MODSEC_REASON="ModSecurity enabled for Apache"
         elif grep -Riq "SecRuleEngine[[:space:]]\+DetectionOnly" \
-            /etc/httpd /etc/apache2 /usr/local/apache/conf 2>/dev/null; then
-
+            /etc/httpd /etc/apache2 /usr/local/apache/conf /etc/cwaf 2>/dev/null; then
             MODSEC_STATUS="Review"
             MODSEC_REASON="ModSecurity in DetectionOnly mode"
-
         else
-
             MODSEC_STATUS="Missing"
             MODSEC_REASON="ModSecurity module loaded but rule engine disabled"
-
         fi
     fi
 
@@ -1060,27 +1241,15 @@ check_services() {
         return
     }
 
-    local active_svcs
-    active_svcs=$(systemctl list-units --type=service --state=active --no-legend 2>/dev/null | awk '{print $1}')
+    local failed_svcs
+    failed_svcs=$(systemctl list-units --type=service --state=failed --no-legend 2>/dev/null | awk '{print $1}')
 
-    local enabled_svcs
-    enabled_svcs=$(systemctl list-unit-files --type=service --state=enabled --no-legend 2>/dev/null | awk '{print $1}' | grep -v '@')
-
-    local down=()
-    local svc
-    for svc in $enabled_svcs; do
-        [[ "$svc" =~ ^(systemd-|proc-sys-|sys-kernel-|dbus-|getty) ]] && continue
-        if ! grep -qwF "$svc" <<<"$active_svcs"; then
-            down+=("${svc%.service}")
-        fi
-    done
-
-    if [[ ${#down[@]} -eq 0 ]]; then
-        SERVICES_STATUS="Good"
-        SERVICES_DOWN="All enabled services running"
-    else
+    if [[ -n "$failed_svcs" ]]; then
         SERVICES_STATUS="Services Down"
-        SERVICES_DOWN=$(IFS=', '; echo "${down[*]}")
+        SERVICES_DOWN=$(echo "$failed_svcs" | sed 's/\.service//g' | paste -sd ', ' -)
+    else
+        SERVICES_STATUS="Good"
+        SERVICES_DOWN="All enabled services operating normally (0 failed units)"
     fi
 
     export SERVICES_DOWN SERVICES_STATUS
@@ -1314,15 +1483,20 @@ check_php_and_users() {
     ACCT_COUNT="N/A"
     ACCT_SUSPENDED="N/A"
 
-    # Detect installed PHP versions
+    # Detect installed PHP and lsphp versions
     local versions
-    versions=$(find /usr/bin -maxdepth 1 -type f -regex '.*/php[0-9.]*' -printf '%f\n' 2>/dev/null | \
-        sed 's/^php//' | grep -E '^[0-9]' | sort -Vu)
+    versions=$({
+        find /usr/bin /usr/local/bin /usr/local/lsws /opt/cpanel /opt/alt -maxdepth 4 -type f \( -name 'php[0-9]*' -o -name 'lsphp[0-9]*' \) 2>/dev/null | grep -oE '(php|lsphp)[0-9.]+' | sed -E 's/^(php|lsphp)//'
+        command -v php >/dev/null 2>&1 && php -r 'echo PHP_VERSION;' 2>/dev/null
+        command -v lsphp >/dev/null 2>&1 && lsphp -r 'echo PHP_VERSION;' 2>/dev/null
+    } | grep -E '^[0-9]' | sort -Vu)
 
     if [[ -n "$versions" ]]; then
         PHP_VERSIONS=$(echo "$versions" | paste -sd ", " -)
     elif command -v php >/dev/null 2>&1; then
         PHP_VERSIONS=$(php -r 'echo PHP_VERSION;' 2>/dev/null)
+    elif command -v lsphp >/dev/null 2>&1; then
+        PHP_VERSIONS=$(lsphp -r 'echo PHP_VERSION;' 2>/dev/null)
     else
         PHP_VERSIONS="Not Installed"
     fi
@@ -1796,6 +1970,8 @@ EOF
         findings_section "ROOTKIT CHECK ($(portal_status "$ROOTKIT_RESULT_STATUS"))" "$ROOTKIT_RESULT_DETAIL"
         if [[ -f /root/scripts/outdated-cms-report.txt ]]; then
             findings_section "CMS UPDATE REPORT ($(portal_status "$OUTDATED_CMS_STATUS"))" "$(cat /root/scripts/outdated-cms-report.txt)"
+        elif [[ -f /root/scripts/malware-scan-report.txt ]] && grep -qi "Outdated CMS" /root/scripts/malware-scan-report.txt; then
+            findings_section "CMS UPDATE REPORT ($(portal_status "$OUTDATED_CMS_STATUS"))" "$(grep -E '^\s*(PHPMailer|WordPress|Joomla|Drupal|Magento|PrestaShop|OpenCart|Shopify|WooCommerce)[[:space:]]+[0-9]' /root/scripts/malware-scan-report.txt 2>/dev/null || true)"
         else
             findings_section "CMS UPDATE REPORT (N/A)" "$OUTDATED_CMS_DETAIL"
         fi
