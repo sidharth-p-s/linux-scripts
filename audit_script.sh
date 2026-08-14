@@ -34,10 +34,6 @@ echo "=== Starting Bobcares Smart Audit at $(date) ==="
 echo "Debug log: $DEBUG_LOG | State dir: $STATE_DIR"
 echo
 
-echo "=== Starting Bobcares Smart Audit at $(date) ==="
-echo "Debug log: $DEBUG_LOG | State dir: $STATE_DIR"
-echo
-
 # Require root privileges
 if [[ $EUID -ne 0 ]]; then
     echo "[ERROR] This audit script must be run as root."
@@ -50,6 +46,40 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Ensure this script is executed ONLY on Non-Control-Panel (No Panel) servers
+check_no_panel_only() {
+    local detected_panel=""
+
+    if [ -f /usr/local/cpanel/version ] || [ -d /usr/local/cpanel ]; then
+        detected_panel="cPanel / WHM"
+    elif [ -f /usr/local/psa/version ] || [ -d /usr/local/psa ] || command -v plesk >/dev/null 2>&1; then
+        detected_panel="Plesk"
+    elif [ -d /usr/local/directadmin ]; then
+        detected_panel="DirectAdmin"
+    elif [ -d /usr/local/CyberCP ]; then
+        detected_panel="CyberPanel"
+    elif [ -d /usr/local/hestia ]; then
+        detected_panel="HestiaCP"
+    elif [ -d /usr/local/vesta ]; then
+        detected_panel="VestaCP"
+    elif [ -d /www/server/panel ]; then
+        detected_panel="aaPanel / BT-Panel"
+    elif [ -d /usr/local/interworx ]; then
+        detected_panel="InterWorx"
+    elif [ -d /usr/local/ispconfig ]; then
+        detected_panel="ISPConfig"
+    elif [ -d /etc/webmin ] || [ -d /usr/libexec/webmin ]; then
+        detected_panel="Webmin / Virtualmin"
+    fi
+
+    if [[ -n "$detected_panel" ]]; then
+        echo "[ERROR] This script is for no panel server. This server has the panel '$detected_panel'. Exiting the script."
+        echo
+        exit 1
+    fi
+}
+check_no_panel_only
+
 # ====================== EOL DEFINITIONS ======================
 UBUNTU_EOL_VERSIONS=(
     "14.04" "14.10" "15.04" "15.10" "16.04" "16.10" "17.04" "17.10"
@@ -59,6 +89,7 @@ UBUNTU_EOL_VERSIONS=(
 
 declare -A EOL_VERSIONS=(
     [centos]="6 7 8"
+    [rhel]="6 7"
     [cloudlinux]="6 7"
     [debian]="6 7 8 9 10 11"
     [rocky]="7"
@@ -256,11 +287,11 @@ check_rdns() {
 
 check_ip_reputation() {
     echo "[DEBUG] Checking IP reputation..."
-    IP_REPUTATION_STATUS="ðŸŸ¢ Good"
+    IP_REPUTATION_STATUS="Good"
     IP_REPUTATION_DETAIL="Not listed on major DNSBLs"
 
     if [[ -z "$MAIN_IP" ]]; then
-        IP_REPUTATION_STATUS="ðŸ”µ Unknown"
+        IP_REPUTATION_STATUS="Unknown"
         IP_REPUTATION_DETAIL="Could not determine public IP"
         export IP_REPUTATION_STATUS IP_REPUTATION_DETAIL
         return
@@ -281,14 +312,15 @@ check_ip_reputation() {
 
     for dnsbl in "${dnsbls[@]}"; do
         local result
-        result=$(dig @8.8.8.8 +short +time=2 +tries=1 "$rev_ip.$dnsbl" 2>/dev/null | head -1)
-        if [[ -n "$result" && "$result" != "127.0.0.1" ]]; then  # Some return 127.0.0.1 for errors
+        # Do not force @8.8.8.8 as Spamhaus blocks public DNS resolvers and returns 127.255.255.254
+        result=$(dig +short +time=2 +tries=1 "$rev_ip.$dnsbl" 2>/dev/null | head -1)
+        if [[ -n "$result" && "$result" != "127.0.0.1" && "$result" != 127.255.255.* ]]; then
             listed_on+=("$dnsbl")
         fi
     done
 
     if [[ ${#listed_on[@]} -gt 0 ]]; then
-        IP_REPUTATION_STATUS="ðŸŸ¡ Listed"
+        IP_REPUTATION_STATUS="Listed"
         IP_REPUTATION_DETAIL="Listed on: ${listed_on[*]}"
     fi
 
@@ -375,22 +407,53 @@ collect_system_info() {
     web_server_proc=$(pgrep -o -x 'httpd|apache2|nginx|lshttpd' 2>/dev/null)
     if [[ -n "$web_server_proc" ]]; then
         HTTP_UPTIME=$(ps -p "$web_server_proc" -o etime= 2>/dev/null | xargs)
-        HTTP_STATUS="ðŸŸ¢ Running"
+        HTTP_STATUS="Running"
     else
         HTTP_UPTIME="Not running"
-        HTTP_STATUS="ðŸ”´ Down"
+        HTTP_STATUS="Down"
     fi
 
-    UPTIME_STATUS="ðŸŸ¢ Good"
+    UPTIME_STATUS="Good"
     [[ "$UPTIME" == *"minute"* && "$UPTIME" != *"hour"* && "$UPTIME" != *"day"* && "$UPTIME" != *"week"* ]] \
-        && UPTIME_STATUS="ðŸŸ¡ Recently rebooted"
+        && UPTIME_STATUS="Recently rebooted"
 
-    if command -v exim >/dev/null 2>&1; then
-        EMAIL_QUEUE=$(exim -bpc 2>/dev/null)
-        [[ ! "$EMAIL_QUEUE" =~ ^[0-9]+$ ]] && EMAIL_QUEUE=0
-    else
-        EMAIL_QUEUE="N/A"
+    EMAIL_QUEUE="N/A"
+    if command -v exim >/dev/null 2>&1 || command -v exim4 >/dev/null 2>&1; then
+        local exim_cmd
+        exim_cmd=$(command -v exim 2>/dev/null || command -v exim4 2>/dev/null)
+        EMAIL_QUEUE=$("$exim_cmd" -bpc 2>/dev/null)
+        [[ ! "$EMAIL_QUEUE" =~ ^[0-9]+$ ]] && EMAIL_QUEUE=""
     fi
+
+    if [[ -z "$EMAIL_QUEUE" || "$EMAIL_QUEUE" == "N/A" ]]; then
+        if command -v postqueue >/dev/null 2>&1; then
+            local pq_out
+            pq_out=$(postqueue -p 2>/dev/null)
+            if grep -qE 'Mail queue is empty|0 Requests' <<<"$pq_out"; then
+                EMAIL_QUEUE=0
+            else
+                EMAIL_QUEUE=$(grep -c '^[0-9A-F]' <<<"$pq_out" 2>/dev/null || echo 0)
+            fi
+        elif command -v mailq >/dev/null 2>&1; then
+            local mq_out
+            mq_out=$(mailq 2>/dev/null)
+            if grep -qE 'Mail queue is empty|0 Requests|is empty' <<<"$mq_out"; then
+                EMAIL_QUEUE=0
+            elif grep -qE '[0-9]+ Requests' <<<"$mq_out"; then
+                EMAIL_QUEUE=$(awk '/Requests\./{print $5}' <<<"$mq_out" | tr -d '.' 2>/dev/null)
+            else
+                EMAIL_QUEUE=$(grep -c '^[0-9A-F]' <<<"$mq_out" 2>/dev/null || echo 0)
+            fi
+        elif command -v qmail-qstat >/dev/null 2>&1; then
+            EMAIL_QUEUE=$(qmail-qstat 2>/dev/null | awk '/messages in queue/{print $4}')
+        elif [[ -d /var/spool/postfix/deferred ]]; then
+            EMAIL_QUEUE=$(find /var/spool/postfix/deferred -type f 2>/dev/null | wc -l)
+        elif [[ -d /var/spool/mqueue ]]; then
+            EMAIL_QUEUE=$(find /var/spool/mqueue -type f 2>/dev/null | wc -l)
+        fi
+    fi
+
+    [[ ! "$EMAIL_QUEUE" =~ ^[0-9]+$ ]] && EMAIL_QUEUE="N/A"
 
     export HOSTNAME KERNEL UPTIME UPTIME_STATUS HTTP_UPTIME HTTP_STATUS LOAD RAM_PCT DISK_PCT EMAIL_QUEUE
 }
@@ -404,28 +467,28 @@ check_ssh_config() {
     SSH_PORT=$(awk '/^port /{print $2}' <<<"$sshd_out" | paste -sd, -)
 
     if [[ "$ROOT_LOGIN_RAW" =~ ^(no|prohibit-password|without-password|forced-commands-only)$ ]]; then
-        ROOT_LOGIN_STATUS="ðŸŸ¢ Good (Disabled / Key Only)"
+        ROOT_LOGIN_STATUS="Good (Disabled / Key Only)"
     elif [[ -z "$ROOT_LOGIN_RAW" ]]; then
-        ROOT_LOGIN_STATUS="ðŸ”µ Unknown"; ROOT_LOGIN_RAW="sshd -T failed (run as root?)"
+        ROOT_LOGIN_STATUS="Unknown"; ROOT_LOGIN_RAW="sshd -T failed (run as root?)"
     else
-        ROOT_LOGIN_STATUS="ðŸ”´ Enabled"
+        ROOT_LOGIN_STATUS="Enabled"
     fi
 
     if [[ "$SSH_PASSWORD_AUTH" == "no" ]]; then
-        SSH_PASSAUTH_STATUS="ðŸŸ¢ Key-only"
+        SSH_PASSAUTH_STATUS="Key-only"
     elif [[ -z "$SSH_PASSWORD_AUTH" ]]; then
-        SSH_PASSAUTH_STATUS="ðŸ”µ Unknown"; SSH_PASSWORD_AUTH="unknown"
+        SSH_PASSAUTH_STATUS="Unknown"; SSH_PASSWORD_AUTH="unknown"
     else
-        SSH_PASSAUTH_STATUS="ðŸŸ¡ Password auth enabled"
+        SSH_PASSAUTH_STATUS="Password auth enabled"
     fi
 
     [[ -z "$SSH_PORT" ]] && SSH_PORT="unknown"
 
     TMP_SEC=$(mount | grep -w /tmp | grep -q noexec && echo "yes" || echo "no")
     if [[ "$TMP_SEC" == "yes" ]]; then
-        TMP_SEC_STATUS="ðŸŸ¢ Good"; TMP_SEC_DETAIL="/tmp is mounted with noexec"
+        TMP_SEC_STATUS="Good"; TMP_SEC_DETAIL="/tmp is mounted with noexec"
     else
-        TMP_SEC_STATUS="ðŸŸ¡ Warning"; TMP_SEC_DETAIL="/tmp is NOT mounted with noexec"
+        TMP_SEC_STATUS="Warning"; TMP_SEC_DETAIL="/tmp is NOT mounted with noexec"
     fi
 
     export ROOT_LOGIN_RAW ROOT_LOGIN_STATUS SSH_PASSWORD_AUTH SSH_PASSAUTH_STATUS SSH_PORT TMP_SEC TMP_SEC_STATUS TMP_SEC_DETAIL
@@ -433,25 +496,25 @@ check_ssh_config() {
 
 check_system_firewall() {
     if csf -l &>/dev/null || systemctl is-active --quiet firewalld 2>/dev/null || systemctl is-active --quiet ufw 2>/dev/null; then
-        SYSTEM_FIREWALL_STATUS="ðŸŸ¢ Good"; SYSTEM_FIREWALL_ANALYSIS="Active"
+        SYSTEM_FIREWALL_STATUS="Good"; SYSTEM_FIREWALL_ANALYSIS="Active"
     else
-        SYSTEM_FIREWALL_STATUS="ðŸ”´ Missing"; SYSTEM_FIREWALL_ANALYSIS="No active firewall detected; enable CSF, firewalld, or ufw"
+        SYSTEM_FIREWALL_STATUS="Missing"; SYSTEM_FIREWALL_ANALYSIS="No active firewall detected; enable CSF, firewalld, or ufw"
     fi
     export SYSTEM_FIREWALL_STATUS SYSTEM_FIREWALL_ANALYSIS
 }
 
 check_brute_force_protection() {
-    BRUTE_STATUS="ðŸ”´ Missing"; BRUTE_REASON="No active brute-force protection detected"
+    BRUTE_STATUS="Missing"; BRUTE_REASON="No active brute-force protection detected"
 
     if command -v imunify360-agent >/dev/null 2>&1 && systemctl is-active --quiet imunify360 2>/dev/null; then
-        BRUTE_STATUS="ðŸŸ¢ Good"; BRUTE_REASON="Imunify360 active"
+        BRUTE_STATUS="Good"; BRUTE_REASON="Imunify360 active"
     elif command -v csf >/dev/null 2>&1 && systemctl is-active --quiet lfd 2>/dev/null \
          && grep -qE '^\s*LF_[A-Z0-9_]+\s*=\s*"?[1-9]' /etc/csf/csf.conf 2>/dev/null; then
-        BRUTE_STATUS="ðŸŸ¢ Good"; BRUTE_REASON="CSF/LFD with Login Failure Detection"
+        BRUTE_STATUS="Good"; BRUTE_REASON="CSF/LFD with Login Failure Detection"
     elif command -v fail2ban-client >/dev/null 2>&1 && systemctl is-active --quiet fail2ban 2>/dev/null; then
         local jails
         jails=$(fail2ban-client status 2>/dev/null | awk -F: '/Jail list/{print $2}' | xargs)
-        BRUTE_STATUS="ðŸŸ¢ Good"; BRUTE_REASON="Fail2Ban active${jails:+ (jails: $jails)}"
+        BRUTE_STATUS="Good"; BRUTE_REASON="Fail2Ban active${jails:+ (jails: $jails)}"
     fi
 
     export BRUTE_STATUS BRUTE_REASON
@@ -467,13 +530,31 @@ check_root_password_age() {
         [[ -n "$epoch" ]] && DAYS_OLD=$(( ($(date +%s) - epoch) / 86400 ))
     fi
 
-    [[ $DAYS_OLD -le 90 ]] && ROOT_PW_STATUS="ðŸŸ¢ Good" || ROOT_PW_STATUS="ðŸŸ¡ Warning"
+    [[ $DAYS_OLD -le 90 ]] && ROOT_PW_STATUS="Good" || ROOT_PW_STATUS="Warning"
     export DAYS_OLD ROOT_PW_STATUS
 }
 
 #-------------------------------------------------------------------------------
 # NEW v4: Threat protection tool status (Malware Scanner / Rootkit Scanner)
 #-------------------------------------------------------------------------------
+
+install_malware_cron() {
+    [[ $EUID -ne 0 ]] && return
+
+    echo "[INFO] ClamAV is installed but malware scan cron is missing. Auto-configuring /etc/cron.d/bc-malware-scan..."
+    mkdir -p /root/scripts
+
+    curl -sS -m 15 -o /root/scripts/run-weekly-malware-scan.sh http://ims.bobcares.com/run-weekly-malware-scan.sh 2>/dev/null || \
+    wget -q -T 15 -O /root/scripts/run-weekly-malware-scan.sh http://ims.bobcares.com/run-weekly-malware-scan.sh 2>/dev/null
+
+    curl -sS -m 15 -o /root/scripts/bobcares-malware-scan.sh http://ims.bobcares.com/bobcares-malware-scan.sh 2>/dev/null || \
+    wget -q -T 15 -O /root/scripts/bobcares-malware-scan.sh http://ims.bobcares.com/bobcares-malware-scan.sh 2>/dev/null
+
+    curl -sS -m 15 -o /etc/cron.d/bc-malware-scan http://ims.bobcares.com/bc-malware-scan.txt 2>/dev/null || \
+    wget -q -T 15 -O /etc/cron.d/bc-malware-scan http://ims.bobcares.com/bc-malware-scan.txt 2>/dev/null
+
+    chmod 755 /root/scripts/run-weekly-malware-scan.sh /root/scripts/bobcares-malware-scan.sh 2>/dev/null
+}
 
 check_threat_tools() {
     local clam="no" cron="no"
@@ -484,14 +565,24 @@ check_threat_tools() {
         cron="yes"
     fi
 
+    # Auto-install cron only if ClamAV is installed but the cron is missing
+    if [[ "$clam" == "yes" && "$cron" == "no" ]]; then
+        install_malware_cron
+        if [[ -f /etc/cron.d/bc-malware-scan ]] \
+            && grep -Eqv '^[[:space:]]*(#|$)' /etc/cron.d/bc-malware-scan \
+            && grep -Eqi 'bobcares-malware-scan|run-weekly-malware-scan' /etc/cron.d/bc-malware-scan; then
+            cron="yes"
+        fi
+    fi
+
     if [[ "$clam" == "yes" && "$cron" == "yes" ]]; then
-        MALWARE_SCANNER_STATUS="ðŸŸ¢ Good"
+        MALWARE_SCANNER_STATUS="Good"
         MALWARE_SCANNER_DETAIL="ClamAV installed; /etc/cron.d/bc-malware-scan is active"
     elif [[ "$clam" == "yes" ]]; then
-        MALWARE_SCANNER_STATUS="ðŸŸ¡ Partial"
+        MALWARE_SCANNER_STATUS="Partial"
         MALWARE_SCANNER_DETAIL="ClamAV installed, but /etc/cron.d/bc-malware-scan is missing or inactive"
     else
-        MALWARE_SCANNER_STATUS="ðŸ”´ Missing"
+        MALWARE_SCANNER_STATUS="Missing"
         MALWARE_SCANNER_DETAIL="No malware scanner detected"
     fi
 
@@ -500,10 +591,10 @@ check_threat_tools() {
     command -v rkhunter >/dev/null 2>&1 && tools+=("rkhunter")
 
     if [[ ${#tools[@]} -gt 0 ]]; then
-        ROOTKIT_SCANNER_STATUS="ðŸŸ¢ Good"
+        ROOTKIT_SCANNER_STATUS="Good"
         ROOTKIT_SCANNER_DETAIL="Installed: ${tools[*]}"
     else
-        ROOTKIT_SCANNER_STATUS="ðŸ”´ Missing"
+        ROOTKIT_SCANNER_STATUS="Missing"
         ROOTKIT_SCANNER_DETAIL="No rootkit scanner detected"
     fi
 
@@ -515,7 +606,8 @@ check_threat_tools() {
 #-------------------------------------------------------------------------------
 
 check_malware_scan_results() {
-    MALWARE_RESULT_STATUS="ðŸ”µ Unknown"
+    echo "[DEBUG] Checking malware scan results..."
+    MALWARE_RESULT_STATUS="Unknown"
     MALWARE_RESULT_DETAIL="No scan report yet - run /root/scripts/bobcares-malware-scan.sh"
 
     local report="/root/scripts/malware-details-report.txt"
@@ -533,13 +625,13 @@ check_malware_scan_results() {
         local age_days
         age_days=$(( ($(date +%s) - $(stat -c %Y "$report" 2>/dev/null || date +%s)) / 86400 ))
         if [[ $malware_count -gt 0 ]]; then
-            MALWARE_RESULT_STATUS="ðŸ”´ Infected"
+            MALWARE_RESULT_STATUS="Infected"
             MALWARE_RESULT_DETAIL="$malware_count suspicious file(s) found (last scan: ${rdate:-unknown})"
         elif (( age_days > 30 )); then
-            MALWARE_RESULT_STATUS="ðŸŸ¡ Review"
+            MALWARE_RESULT_STATUS="Review"
             MALWARE_RESULT_DETAIL="No malware found, but the scan report is $age_days day(s) old (last scan: ${rdate:-unknown})"
         else
-            MALWARE_RESULT_STATUS="ðŸŸ¢ Clean"
+            MALWARE_RESULT_STATUS="Clean"
             MALWARE_RESULT_DETAIL="No malware found (last scan: ${rdate:-unknown})"
         fi
     elif [ -f "$old_report" ]; then
@@ -554,19 +646,19 @@ check_malware_scan_results() {
         local age_days
         age_days=$(( ($(date +%s) - $(stat -c %Y "$old_report" 2>/dev/null || date +%s)) / 86400 ))
         if [[ $cnt -gt 0 ]]; then
-            MALWARE_RESULT_STATUS="ðŸ”´ Infected"
+            MALWARE_RESULT_STATUS="Infected"
             MALWARE_RESULT_DETAIL="$cnt suspicious file(s) in $files (last scan: ${rdate:-unknown})"
         elif (( age_days > 30 )); then
-            MALWARE_RESULT_STATUS="ðŸŸ¡ Review"
+            MALWARE_RESULT_STATUS="Review"
             MALWARE_RESULT_DETAIL="No malware found, but the scan report is $age_days day(s) old (last scan: ${rdate:-unknown})"
         else
-            MALWARE_RESULT_STATUS="ðŸŸ¢ Clean"
+            MALWARE_RESULT_STATUS="Clean"
             MALWARE_RESULT_DETAIL="No malware found (last scan: ${rdate:-unknown})"
         fi
     fi
 
     # Also parse the separate Outdated CMS report (produced by the same malware scan script)
-    OUTDATED_CMS_STATUS="ðŸ”µ Unknown"
+    OUTDATED_CMS_STATUS="Unknown"
     OUTDATED_CMS_DETAIL="No CMS version report available"
 
     local cms_report="/root/scripts/outdated-cms-report.txt"
@@ -580,10 +672,10 @@ check_malware_scan_results() {
         [[ "$outdated_count" =~ ^[0-9]+$ ]] || outdated_count=0
 
         if [[ $outdated_count -eq 0 ]]; then
-            OUTDATED_CMS_STATUS="ðŸŸ¢ Good"
+            OUTDATED_CMS_STATUS="Good"
             OUTDATED_CMS_DETAIL="No outdated CMS or PHPMailer packages detected (last check: ${cdate:-unknown})"
         else
-            OUTDATED_CMS_STATUS="ðŸŸ¡ Outdated"
+            OUTDATED_CMS_STATUS="Outdated"
             OUTDATED_CMS_DETAIL="$outdated_count outdated package(s) found (last check: ${cdate:-unknown})"
         fi
     fi
@@ -592,14 +684,43 @@ check_malware_scan_results() {
 }
 
 check_rootkit_scan_results() {
-    ROOTKIT_RESULT_STATUS="ðŸŸ¡ Review"
+    echo "[DEBUG] Checking rootkit scan results..."
+    ROOTKIT_RESULT_STATUS="Review"
     ROOTKIT_RESULT_DETAIL="Rootkit summary is unavailable; check the latest scan log"
 
-    # rkhunter's summary is authoritative.  Individual Warning lines commonly
-    # include harmless configuration/file-property notices and are not rootkits.
-    local log possible="" rdate
-    for log in /root/scripts/chkrootkit-report.txt /var/log/rkhunter/rkhunter.log /var/log/rkhunter.log; do
-        [[ -f "$log" ]] || continue
+    local log rdate
+    local chk_log="" rk_log=""
+
+    for log in /root/scripts/chkrootkit-report.txt /var/log/chkrootkit.log /var/log/chkrootkit/log /var/log/chkrootkit/chkrootkit.log; do
+        [[ -f "$log" ]] && { chk_log="$log"; break; }
+    done
+
+    for log in /var/log/rkhunter/rkhunter.log /var/log/rkhunter.log /root/scripts/rkhunter-report.txt; do
+        [[ -f "$log" ]] && { rk_log="$log"; break; }
+    done
+
+    if [[ -n "$chk_log" ]]; then
+        rdate=$(date -r "$chk_log" '+%Y-%m-%d %H:%M' 2>/dev/null)
+        local infected_lines
+        infected_lines=$(grep -i 'INFECTED' "$chk_log" 2>/dev/null | grep -ivE 'not infected|not tested|0 infected' || true)
+        local inf_count=0
+        if [[ -n "$infected_lines" ]]; then
+            inf_count=$(wc -l <<<"$infected_lines")
+        fi
+
+        if (( inf_count == 0 )); then
+            ROOTKIT_RESULT_STATUS="Clean"
+            ROOTKIT_RESULT_DETAIL="chkrootkit: 0 infected items found (last scan: ${rdate:-unknown})"
+        else
+            ROOTKIT_RESULT_STATUS="Infected"
+            ROOTKIT_RESULT_DETAIL="chkrootkit: $inf_count suspicious INFECTED result(s) found (last scan: ${rdate:-unknown})"
+        fi
+        export ROOTKIT_RESULT_STATUS ROOTKIT_RESULT_DETAIL
+        return
+    fi
+
+    if [[ -n "$rk_log" ]]; then
+        local possible=""
         possible=$(awk '
             tolower($0) ~ /possible rootkits[[:space:]]*:/ {
                 value=tolower($0)
@@ -607,21 +728,23 @@ check_rootkit_scan_results() {
                 sub(/[^0-9].*/, "", value)
             }
             END { print value }
-        ' "$log" 2>/dev/null)
-        [[ "$possible" =~ ^[0-9]+$ ]] || continue
-        rdate=$(date -r "$log" '+%Y-%m-%d %H:%M' 2>/dev/null)
-        if (( possible == 0 )); then
-            ROOTKIT_RESULT_STATUS="ðŸŸ¢ Clean"
-            ROOTKIT_RESULT_DETAIL="Possible rootkits: 0 (last scan: ${rdate:-unknown})"
-        elif (( possible > 10 )); then
-            ROOTKIT_RESULT_STATUS="ðŸ”´ Infected"
-            ROOTKIT_RESULT_DETAIL="Possible rootkits: $possible (last scan: ${rdate:-unknown})"
-        else
-            ROOTKIT_RESULT_STATUS="ðŸŸ¡ Review"
-            ROOTKIT_RESULT_DETAIL="Possible rootkits: $possible; verify the scan result (last scan: ${rdate:-unknown})"
+        ' "$rk_log" 2>/dev/null)
+        if [[ "$possible" =~ ^[0-9]+$ ]]; then
+            rdate=$(date -r "$rk_log" '+%Y-%m-%d %H:%M' 2>/dev/null)
+            if (( possible == 0 )); then
+                ROOTKIT_RESULT_STATUS="Clean"
+                ROOTKIT_RESULT_DETAIL="rkhunter: 0 possible rootkits (last scan: ${rdate:-unknown})"
+            elif (( possible > 10 )); then
+                ROOTKIT_RESULT_STATUS="Infected"
+                ROOTKIT_RESULT_DETAIL="rkhunter: Possible rootkits: $possible (last scan: ${rdate:-unknown})"
+            else
+                ROOTKIT_RESULT_STATUS="Review"
+                ROOTKIT_RESULT_DETAIL="rkhunter: Possible rootkits: $possible; verify scan result (last scan: ${rdate:-unknown})"
+            fi
         fi
-        break
-    done
+        export ROOTKIT_RESULT_STATUS ROOTKIT_RESULT_DETAIL
+        return
+    fi
 
     export ROOTKIT_RESULT_STATUS ROOTKIT_RESULT_DETAIL
 }
@@ -638,7 +761,7 @@ check_kernel_status() {
     KC_ACTIVE="no"
     KC_EFFECTIVE=""
     KERNEL_UPDATE_AVAILABLE="No"
-    KERNEL_STATUS="ðŸŸ¢ Good"
+    KERNEL_STATUS="Good"
     KERNEL_ANALYSIS=""
 
     local ctype=""
@@ -652,7 +775,7 @@ check_kernel_status() {
 
     if [[ -n "$ctype" ]]; then
         KERNEL_ENV="container ($ctype)"
-        KERNEL_STATUS="ðŸ”µ Host-managed"
+        KERNEL_STATUS="Host-managed"
         KERNEL_ANALYSIS="Container guest: kernel belongs to the host node. Kernel upgrade must be done on the host."
     fi
 
@@ -673,7 +796,7 @@ check_kernel_status() {
         fi
 
         if [[ "$KERNEL_ENV" != "standard" ]]; then
-            KERNEL_STATUS="ðŸŸ¡ Custom/Network"
+            KERNEL_STATUS="Custom/Network"
             KERNEL_ANALYSIS="Running a custom/network kernel not managed by package manager."
         fi
     fi
@@ -704,10 +827,10 @@ check_kernel_status() {
 
         if [[ "$KERNEL_UPDATE_AVAILABLE" != "No" ]]; then
             if [[ "$KC_ACTIVE" == "yes" ]]; then
-                KERNEL_STATUS="ðŸŸ¢ Covered by KernelCare"
+                KERNEL_STATUS="Covered by KernelCare"
                 KERNEL_ANALYSIS="Update available but covered by KernelCare live-patching."
             else
-                KERNEL_STATUS="ðŸŸ¡ Update Available"
+                KERNEL_STATUS="Update Available"
                 KERNEL_ANALYSIS="Kernel update available. Install and reboot, or deploy KernelCare."
             fi
         fi
@@ -729,8 +852,8 @@ check_reboot_required() {
 
         if command -v needs-restarting >/dev/null 2>&1; then
             local nr_out
-            nr_out=$(needs-restarting -r 2>/dev/null)
-            if [[ $? -ne 0 ]]; then
+            nr_out=$(timeout 15 needs-restarting -r 2>/dev/null || true)
+            if [[ -n "$nr_out" ]]; then
                 REBOOT_REQUIRED="Yes"
                 REBOOT_REASON="Core components updated since boot"
                 if grep -E '^\s*\*' <<<"$nr_out" | grep -qiv 'kernel'; then
@@ -738,7 +861,7 @@ check_reboot_required() {
                 fi
                 grep -E '^\s*\*' <<<"$nr_out" | grep -qi 'kernel' && kernel_pending="yes"
             fi
-            SVC_RESTART_LIST=$(needs-restarting -s 2>/dev/null | grep -Ev '^\s*$' | sort -u | paste -sd ', ' - | head -c 400)
+            SVC_RESTART_LIST=$(timeout 15 needs-restarting -s 2>/dev/null | grep -Ev '^\s*$' | sort -u | paste -sd ', ' - | head -c 400 || true)
             [[ -n "$SVC_RESTART_LIST" ]] && SVC_RESTART_COUNT=$(awk -F', ' '{print NF}' <<<"$SVC_RESTART_LIST")
         elif [[ "$kernel_pending" == "yes" ]]; then
             REBOOT_REQUIRED="Yes"
@@ -757,7 +880,7 @@ check_reboot_required() {
             fi
         fi
         if command -v needrestart >/dev/null 2>&1; then
-            SVC_RESTART_LIST=$(needrestart -b -r l 2>/dev/null | awk '/^NEEDRESTART-SVC:/{print $2}' | sed 's/\.service$//' | sort -u | paste -sd ', ' - | head -c 400)
+            SVC_RESTART_LIST=$(NEEDRESTART_MODE=a timeout 15 needrestart -b -r l 2>/dev/null | awk '/^NEEDRESTART-SVC:/{print $2}' | sed 's/\.service$//' | sort -u | paste -sd ', ' - | head -c 400 || true)
             [[ -n "$SVC_RESTART_LIST" ]] && SVC_RESTART_COUNT=$(awk -F', ' '{print NF}' <<<"$SVC_RESTART_LIST")
         fi
     fi
@@ -776,9 +899,9 @@ check_reboot_required() {
     fi
 
     case "$REBOOT_REQUIRED" in
-        "Yes")                        REBOOT_STATUS="ðŸŸ¡ Reboot Required" ;;
-        "No (kernel live-patched)")   REBOOT_STATUS="ðŸŸ¢ KernelCare Covered" ;;
-        *)                            REBOOT_STATUS="ðŸŸ¢ Good" ;;
+        "Yes")                        REBOOT_STATUS="Reboot Required" ;;
+        "No (kernel live-patched)")   REBOOT_STATUS="KernelCare Covered" ;;
+        *)                            REBOOT_STATUS="Good" ;;
     esac
     export REBOOT_REQUIRED REBOOT_REASON REBOOT_STATUS SVC_RESTART_LIST SVC_RESTART_COUNT
 }
@@ -871,7 +994,8 @@ check_system_version() {
 }
 
 check_modsecurity() {
-    MODSEC_STATUS="ðŸ”´ Missing"
+    echo "[DEBUG] Checking ModSecurity..."
+    MODSEC_STATUS="Missing"
     MODSEC_REASON="ModSecurity not detected"
 
     local apache_conf=""
@@ -892,7 +1016,7 @@ check_modsecurity() {
         nginx_conf=$(nginx -T 2>/dev/null)
 
         if echo "$nginx_conf" | grep -qiE 'modsecurity[[:space:]]+on'; then
-            MODSEC_STATUS="ðŸŸ¢ Good"
+            MODSEC_STATUS="Good"
             MODSEC_REASON="ModSecurity enabled for Nginx"
             export MODSEC_STATUS MODSEC_REASON
             return
@@ -905,18 +1029,18 @@ check_modsecurity() {
         if grep -Riq "SecRuleEngine[[:space:]]\+On" \
             /etc/httpd /etc/apache2 /usr/local/apache/conf 2>/dev/null; then
 
-            MODSEC_STATUS="ðŸŸ¢ Good"
+            MODSEC_STATUS="Good"
             MODSEC_REASON="ModSecurity enabled"
 
         elif grep -Riq "SecRuleEngine[[:space:]]\+DetectionOnly" \
             /etc/httpd /etc/apache2 /usr/local/apache/conf 2>/dev/null; then
 
-            MODSEC_STATUS="ðŸŸ¡ Review"
+            MODSEC_STATUS="Review"
             MODSEC_REASON="ModSecurity in DetectionOnly mode"
 
         else
 
-            MODSEC_STATUS="ðŸ”´ Missing"
+            MODSEC_STATUS="Missing"
             MODSEC_REASON="ModSecurity module loaded but rule engine disabled"
 
         fi
@@ -926,8 +1050,9 @@ check_modsecurity() {
 }
 
 check_services() {
+    echo "[DEBUG] Checking system services..."
     SERVICES_DOWN=""
-    SERVICES_STATUS="ðŸ”µ N/A"
+    SERVICES_STATUS="N/A"
 
     command -v systemctl >/dev/null 2>&1 || {
         SERVICES_DOWN="systemctl not available"
@@ -935,27 +1060,35 @@ check_services() {
         return
     }
 
-    SERVICES_DOWN=$(
-        systemctl list-unit-files --type=service --state=enabled --no-legend 2>/dev/null |
-        awk '{print $1}' |
-        while read -r svc; do
-            systemctl is-active --quiet "$svc" || echo "${svc%.service}"
-        done |
-        paste -sd ", " -
-    )
+    local active_svcs
+    active_svcs=$(systemctl list-units --type=service --state=active --no-legend 2>/dev/null | awk '{print $1}')
 
-    if [[ -z "$SERVICES_DOWN" ]]; then
-        SERVICES_STATUS="ðŸŸ¢ Good"
+    local enabled_svcs
+    enabled_svcs=$(systemctl list-unit-files --type=service --state=enabled --no-legend 2>/dev/null | awk '{print $1}' | grep -v '@')
+
+    local down=()
+    local svc
+    for svc in $enabled_svcs; do
+        [[ "$svc" =~ ^(systemd-|proc-sys-|sys-kernel-|dbus-|getty) ]] && continue
+        if ! grep -qwF "$svc" <<<"$active_svcs"; then
+            down+=("${svc%.service}")
+        fi
+    done
+
+    if [[ ${#down[@]} -eq 0 ]]; then
+        SERVICES_STATUS="Good"
         SERVICES_DOWN="All enabled services running"
     else
-        SERVICES_STATUS="ðŸ”´ Services Down"
+        SERVICES_STATUS="Services Down"
+        SERVICES_DOWN=$(IFS=', '; echo "${down[*]}")
     fi
 
     export SERVICES_DOWN SERVICES_STATUS
 }
 
 check_ssl_expiry() {
-    SSL_STATUS="ðŸ”µ N/A"
+    echo "[DEBUG] Checking SSL certificate expiry..."
+    SSL_STATUS="N/A"
     SSL_EXPIRY="No SSL certificates found"
 
     command -v openssl >/dev/null 2>&1 || {
@@ -968,9 +1101,10 @@ check_ssl_expiry() {
     local earliest_date=""
 
     while IFS= read -r cert; do
+        [[ -f "$cert" && -s "$cert" ]] || continue
         local enddate end_epoch now_epoch days
 
-        enddate=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2)
+        enddate=$(timeout 2 openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2)
         [[ -z "$enddate" ]] && continue
 
         end_epoch=$(date -d "$enddate" +%s 2>/dev/null)
@@ -982,19 +1116,20 @@ check_ssl_expiry() {
             earliest_date="$enddate"
         fi
     done < <(
-        find /etc/ssl /etc/pki /etc/letsencrypt \
-            -type f \( -name "*.crt" -o -name "*.pem" \) 2>/dev/null
+        timeout 5 find /etc/ssl /etc/pki /etc/letsencrypt \
+            -maxdepth 3 -type f \( -name "*.crt" -o -name "*.pem" \) \
+            ! -path "*/certs/*" ! -path "*/ca-trust/*" ! -path "*ca-bundle*" ! -path "*cacert*" 2>/dev/null
     )
 
     if [[ -n "$earliest_days" ]]; then
         SSL_EXPIRY="$earliest_date"
 
         if (( earliest_days < 0 )); then
-            SSL_STATUS="ðŸ”´ Expired"
+            SSL_STATUS="Expired"
         elif (( earliest_days <= 30 )); then
-            SSL_STATUS="ðŸŸ¡ Expiring Soon"
+            SSL_STATUS="Expiring Soon"
         else
-            SSL_STATUS="ðŸŸ¢ Good"
+            SSL_STATUS="Good"
         fi
     fi
 
@@ -1002,7 +1137,8 @@ check_ssl_expiry() {
 }
 
 check_backups() {
-    BACKUP_STATUS="ðŸ”µ N/A"
+    echo "[DEBUG] Checking backups..."
+    BACKUP_STATUS="N/A"
     BACKUP_DETAILS="No backups detected"
 
     local backup_dirs=(
@@ -1023,7 +1159,7 @@ check_backups() {
         [[ -d "$dir" ]] || continue
 
         local ts
-        ts=$(find "$dir" -type f -printf '%T@\n' 2>/dev/null | sort -nr | head -1)
+        ts=$(timeout 3 find "$dir" -maxdepth 2 -xdev -type f -printf '%T@\n' 2>/dev/null | sort -nr | head -1)
 
         if [[ -n "$ts" ]]; then
             found="$dir"
@@ -1043,17 +1179,17 @@ check_backups() {
         age=$(( (now - latest) / 86400 ))
 
         if (( age <= 1 )); then
-            BACKUP_STATUS="ðŸŸ¢ Good"
+            BACKUP_STATUS="Good"
         elif (( age <= 7 )); then
-            BACKUP_STATUS="ðŸŸ¡ Old"
+            BACKUP_STATUS="Old"
         else
-            BACKUP_STATUS="ðŸ”´ Stale"
+            BACKUP_STATUS="Stale"
         fi
 
         BACKUP_DETAILS="Latest backup ${age} day(s) old (${found}) | Backup Cron: ${cron_found}"
     else
         if [[ "$cron_found" == "Yes" ]]; then
-            BACKUP_STATUS="ðŸŸ¡ Warning"
+            BACKUP_STATUS="Warning"
             BACKUP_DETAILS="Backup cron found, but no backup files detected"
         fi
     fi
@@ -1066,21 +1202,22 @@ check_backups() {
 #-------------------------------------------------------------------------------
 
 check_backup_extended() {
+    echo "[DEBUG] Checking extended backup configuration..."
     # Only treat named backup locations and likely backup archives as backups.
-    # This deliberately excludes package-manager files such as /var/backups/dpkg.*.
+    # Deliberately exclude scanning deep /home or network mounts.
     local backup_dirs=(/backup /backups /home/backup /home/backups /data/backup /data/backups /mnt/backup /mnt/backups /opt/backup /opt/backups)
     local dir file base mtime latest="" latest_time=0 size size_kb age_days backup_dir_count=0
     while IFS= read -r dir; do backup_dirs+=("$dir"); done < <(
-        find /home /data /mnt -maxdepth 3 -type d \( -iname '*backup*' -o -iname 'cpbackup' \) 2>/dev/null
+        timeout 4 find /home /data /mnt -maxdepth 2 -xdev -type d \( -iname '*backup*' -o -iname 'cpbackup' \) 2>/dev/null
     )
 
-    BACKUP_DAILY_STATUS="ðŸ”µ N/A"; BACKUP_DAILY_DETAIL="N/A - no backup cron found"
-    BACKUP_WEEKLY_STATUS="ðŸ”µ N/A"; BACKUP_WEEKLY_DETAIL="N/A - no backup cron found"
-    BACKUP_MONTHLY_STATUS="ðŸ”µ N/A"; BACKUP_MONTHLY_DETAIL="N/A - no backup cron found"
-    BACKUP_RETENTION_STATUS="ðŸ”µ N/A"; BACKUP_RETENTION_DETAIL="N/A - retention cannot be determined from a cron schedule"
-    BACKUP_REMOTE_STATUS="ðŸ”´ Not configured"; BACKUP_REMOTE_DETAIL="No scheduled remote-backup configuration found"
-    BACKUP_LAST_STATUS="ðŸ”µ Unknown"; BACKUP_LAST_DETAIL="No qualifying backup archive found"
-    BACKUP_SIZE_STATUS="ðŸ”µ Unknown"; BACKUP_SIZE_DETAIL="N/A"
+    BACKUP_DAILY_STATUS="N/A"; BACKUP_DAILY_DETAIL="N/A - no backup cron found"
+    BACKUP_WEEKLY_STATUS="N/A"; BACKUP_WEEKLY_DETAIL="N/A - no backup cron found"
+    BACKUP_MONTHLY_STATUS="N/A"; BACKUP_MONTHLY_DETAIL="N/A - no backup cron found"
+    BACKUP_RETENTION_STATUS="N/A"; BACKUP_RETENTION_DETAIL="N/A - retention cannot be determined from a cron schedule"
+    BACKUP_REMOTE_STATUS="Not configured"; BACKUP_REMOTE_DETAIL="No scheduled remote-backup configuration found"
+    BACKUP_LAST_STATUS="Unknown"; BACKUP_LAST_DETAIL="No qualifying backup archive found"
+    BACKUP_SIZE_STATUS="Unknown"; BACKUP_SIZE_DETAIL="N/A"
 
     local cron_lines cron_schedule
     cron_lines=$({
@@ -1105,55 +1242,57 @@ check_backup_extended() {
             END { printf "%d %d %d", daily, weekly, monthly }
         ' <<<"$cron_lines")
         read -r has_daily has_weekly has_monthly <<<"$cron_schedule"
-        [[ "$has_daily" == 1 ]] && { BACKUP_DAILY_STATUS="ðŸŸ¢ Configured"; BACKUP_DAILY_DETAIL="Backup cron schedule detected"; }
-        [[ "$has_weekly" == 1 ]] && { BACKUP_WEEKLY_STATUS="ðŸŸ¢ Configured"; BACKUP_WEEKLY_DETAIL="Backup cron schedule detected"; }
-        [[ "$has_monthly" == 1 ]] && { BACKUP_MONTHLY_STATUS="ðŸŸ¢ Configured"; BACKUP_MONTHLY_DETAIL="Backup cron schedule detected"; }
+        [[ "$has_daily" == 1 ]] && { BACKUP_DAILY_STATUS="Configured"; BACKUP_DAILY_DETAIL="Backup cron schedule detected"; }
+        [[ "$has_weekly" == 1 ]] && { BACKUP_WEEKLY_STATUS="Configured"; BACKUP_WEEKLY_DETAIL="Backup cron schedule detected"; }
+        [[ "$has_monthly" == 1 ]] && { BACKUP_MONTHLY_STATUS="Configured"; BACKUP_MONTHLY_DETAIL="Backup cron schedule detected"; }
     fi
 
     if grep -Eqi 'restic|borg|rclone|duplicity|rdiff-backup|aws[[:space:]]+s3|sftp:|rsync://|ssh://' <<<"$cron_lines" \
         || [[ -f /root/.config/rclone/rclone.conf || -f /root/.restic/config ]] \
         || find /etc/restic /etc/borg -maxdepth 2 -type f -print -quit 2>/dev/null | grep -q .; then
-        BACKUP_REMOTE_STATUS="ðŸŸ¢ Configured"
+        BACKUP_REMOTE_STATUS="Configured"
         BACKUP_REMOTE_DETAIL="Remote backup configuration or scheduled command detected"
     fi
 
     for dir in "${backup_dirs[@]}"; do
         [[ -d "$dir" ]] || continue
-        ((backup_dir_count++))
+        local has_archives=0
         while IFS= read -r file; do
             base=${file##*/}
             [[ "$base" =~ ^(dpkg|apt|alternatives|btmp|wtmp|lastlog|unattended-upgrades) ]] && continue
             [[ "$base" =~ (backup|cpbackup|jetbackup|full|daily|weekly|monthly|\.tar(\.(gz|bz2|xz|zst))?$|\.tgz$|\.zip$|\.sql(\.gz)?$) ]] || continue
+            has_archives=1
             mtime=$(stat -c %Y "$file" 2>/dev/null) || continue
             (( mtime > latest_time )) && { latest_time=$mtime; latest="$file"; }
-        done < <(find "$dir" -maxdepth 5 -type f -size +1M 2>/dev/null)
+        done < <(timeout 4 find "$dir" -maxdepth 3 -xdev -type f -size +1M 2>/dev/null)
+        (( has_archives == 1 )) && ((backup_dir_count++))
     done
 
     # Local backup is valid only when both a backup location and a scheduled
     # backup cron are present.  One without the other needs verification.
     if (( backup_dir_count > 0 )) && [[ -n "$cron_lines" ]]; then
-        BACKUP_STATUS="ðŸŸ¢ Good"
+        BACKUP_STATUS="Good"
         BACKUP_DETAIL="Backup directory detected ($backup_dir_count location(s)) and backup cron is present"
     elif (( backup_dir_count > 0 )); then
-        BACKUP_STATUS="ðŸŸ¡ Review"
+        BACKUP_STATUS="Review"
         BACKUP_DETAIL="Backup directory detected ($backup_dir_count location(s)), but no backup cron found"
     elif [[ -n "$cron_lines" ]]; then
-        BACKUP_STATUS="ðŸŸ¡ Review"
+        BACKUP_STATUS="Review"
         BACKUP_DETAIL="Backup cron found, but no backup directory detected"
     else
-        BACKUP_STATUS="ðŸ”´ Missing"
+        BACKUP_STATUS="Missing"
         BACKUP_DETAIL="No backup directory and no backup cron found"
     fi
 
     if [[ -n "$latest" ]]; then
         age_days=$(( ($(date +%s) - latest_time) / 86400 ))
-        if (( age_days <= 2 )); then BACKUP_LAST_STATUS="ðŸŸ¢ Recent"
-        elif (( age_days <= 8 )); then BACKUP_LAST_STATUS="ðŸŸ¡ Aging"
-        else BACKUP_LAST_STATUS="ðŸ”´ Stale"; fi
+        if (( age_days <= 2 )); then BACKUP_LAST_STATUS="Recent"
+        elif (( age_days <= 8 )); then BACKUP_LAST_STATUS="Aging"
+        else BACKUP_LAST_STATUS="Stale"; fi
         BACKUP_LAST_DETAIL="$latest (${age_days} day(s) old)"
         size=$(du -sh "$latest" 2>/dev/null | awk '{print $1}')
         size_kb=$(du -sk "$latest" 2>/dev/null | awk '{print $1}')
-        BACKUP_SIZE_STATUS="ðŸŸ¢ OK"; BACKUP_SIZE_DETAIL="$size"
+        BACKUP_SIZE_STATUS="OK"; BACKUP_SIZE_DETAIL="$size"
     else
         BACKUP_LAST_DETAIL="No qualifying backup archive found"
     fi
@@ -1169,6 +1308,7 @@ check_backup_extended() {
 }
 
 check_php_and_users() {
+    echo "[DEBUG] Checking PHP and user accounts..."
     PHP_VERSIONS="N/A"
     PHP_DEFAULT="N/A"
     ACCT_COUNT="N/A"
@@ -1197,10 +1337,12 @@ check_php_and_users() {
     # Count normal user accounts (UID >=1000)
     ACCT_COUNT=$(awk -F: '$3>=1000 && $3<65534 {c++} END{print c+0}' /etc/passwd)
 
-    # Count locked/suspended accounts
-    ACCT_SUSPENDED=$(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd | while read -r u; do
-        passwd -S "$u" 2>/dev/null | awk '$2=="L"{c++} END{print c+0}'
-    done)
+    # Count locked/suspended accounts efficiently without slow loops
+    if [ -f /etc/shadow ] && [ -r /etc/shadow ]; then
+        ACCT_SUSPENDED=$(awk -F: 'BEGIN{c=0} $3>=1000 && $3<65534 {if ($2 ~ /^!/ || $2 ~ /^\*/) c++} END{print c}' /etc/shadow 2>/dev/null || echo 0)
+    else
+        ACCT_SUSPENDED=0
+    fi
 
     export PHP_VERSIONS PHP_DEFAULT ACCT_COUNT ACCT_SUSPENDED
 }
@@ -1210,7 +1352,8 @@ check_php_and_users() {
 #-------------------------------------------------------------------------------
 
 check_php_eol() {
-    PHP_EOL_STATUS="ðŸ”µ Unknown"
+    echo "[DEBUG] Checking PHP EOL status..."
+    PHP_EOL_STATUS="Unknown"
     PHP_EOL_DETAIL="Could not determine installed PHP versions"
 
     [[ -z "$PHP_VERSIONS" || "$PHP_VERSIONS" == "N/A" || "$PHP_VERSIONS" == "Unknown" || "$PHP_VERSIONS" == "Not Installed" ]] && {
@@ -1236,10 +1379,10 @@ check_php_eol() {
     done
 
     if [[ ${#found[@]} -gt 0 ]]; then
-        PHP_EOL_STATUS="ðŸŸ¡ EOL versions present"
+        PHP_EOL_STATUS="EOL versions present"
         PHP_EOL_DETAIL="No longer supported by vendor: $(printf '%s, ' "${found[@]}" | sed 's/, $//') (default: $PHP_DEFAULT)"
     else
-        PHP_EOL_STATUS="ðŸŸ¢ Good"
+        PHP_EOL_STATUS="Good"
         PHP_EOL_DETAIL="All installed PHP versions are vendor-supported"
     fi
 
@@ -1247,7 +1390,8 @@ check_php_eol() {
 }
 
 check_php_functions_security() {
-    PHP_FUNC_STATUS="ðŸ”µ Unknown"
+    echo "[DEBUG] Checking PHP functions security..."
+    PHP_FUNC_STATUS="Unknown"
     PHP_FUNC_DETAIL="No php.ini files found"
 
     local inis=() ini
@@ -1265,28 +1409,47 @@ check_php_functions_security() {
         return
     }
 
-    local secured=0 insecure=()
+    local fully_secured=0 partial_secured=0 insecure=()
+    local funcs=("exec" "shell_exec" "system" "passthru")
 
     for ini in "${inis[@]}"; do
         local df
         df=$(awk -F= '/^[[:space:]]*disable_functions[[:space:]]*=/{print $2}' "$ini" 2>/dev/null | tail -1 | tr -d ' "')
 
-        if [[ -n "$df" ]] && grep -qE '(^|,)(exec|shell_exec|system|passthru)(,|$)' <<<"$df"; then
-            secured=$((secured + 1))
+        if [[ -z "$df" ]]; then
+            insecure+=("$ini")
+            continue
+        fi
+
+        local missing=()
+        local matched=0
+        for f in "${funcs[@]}"; do
+            if grep -qE "(^|,)${f}(,|$)" <<<"$df"; then
+                ((matched++))
+            else
+                missing+=("$f")
+            fi
+        done
+
+        if (( matched == ${#funcs[@]} )); then
+            ((fully_secured++))
+        elif (( matched > 0 )); then
+            ((partial_secured++))
+            insecure+=("$ini")
         else
             insecure+=("$ini")
         fi
     done
 
     if [[ ${#insecure[@]} -eq 0 ]]; then
-        PHP_FUNC_STATUS="ðŸŸ¢ Good"
-        PHP_FUNC_DETAIL="Dangerous functions disabled in all ${#inis[@]} php.ini file(s)"
-    elif [[ $secured -gt 0 ]]; then
-        PHP_FUNC_STATUS="ðŸŸ¡ Partial"
-        PHP_FUNC_DETAIL="disable_functions missing exec/system in: ${insecure[*]}"
+        PHP_FUNC_STATUS="Good"
+        PHP_FUNC_DETAIL="Dangerous functions (exec, shell_exec, system, passthru) disabled in all ${#inis[@]} php.ini file(s)"
+    elif (( fully_secured > 0 || partial_secured > 0 )); then
+        PHP_FUNC_STATUS="Partial"
+        PHP_FUNC_DETAIL="disable_functions incomplete or missing exec/system in: ${insecure[*]}"
     else
-        PHP_FUNC_STATUS="ðŸ”´ Not set"
-        PHP_FUNC_DETAIL="Dangerous PHP functions (exec, shell_exec, system, passthru...) are not disabled"
+        PHP_FUNC_STATUS="Not set"
+        PHP_FUNC_DETAIL="Dangerous PHP functions (exec, shell_exec, system, passthru) are not disabled"
     fi
 
     export PHP_FUNC_STATUS PHP_FUNC_DETAIL
@@ -1312,7 +1475,8 @@ check_rdns_status() {
 }
 
 check_reboot_procedure_info() {
-    REBOOT_PROC_STATUS="ðŸ”µ Manual"
+    echo "[DEBUG] Checking reboot procedure info..."
+    REBOOT_PROC_STATUS="Manual"
     if [[ "$VM_STATUS" == Physical* ]]; then
         REBOOT_PROC_DETAIL="Physical machine - confirm provider IPMI/KVM or rescue console access is documented"
     else
@@ -1322,19 +1486,20 @@ check_reboot_procedure_info() {
 }
 
 check_resource_usage() {
-    (( $(echo "$LOAD > 5" | bc 2>/dev/null || echo 0) )) && CPU_STATUS="ðŸŸ¡ High" || CPU_STATUS="ðŸŸ¢ Optimal"
-    [[ $RAM_PCT -gt 80 ]] && RAM_STATUS="ðŸŸ¡ High" || RAM_STATUS="ðŸŸ¢ Good"
-    [[ $DISK_PCT -gt 80 ]] && DISK_STATUS="ðŸ”´ Critical" || DISK_STATUS="ðŸŸ¢ Good"
+    echo "[DEBUG] Checking resource usage..."
+    (( $(echo "$LOAD > 5" | bc 2>/dev/null || echo 0) )) && CPU_STATUS="High" || CPU_STATUS="Optimal"
+    [[ $RAM_PCT -gt 80 ]] && RAM_STATUS="High" || RAM_STATUS="Good"
+    [[ $DISK_PCT -gt 80 ]] && DISK_STATUS="Critical" || DISK_STATUS="Good"
 
     if [[ "$EMAIL_QUEUE" == "N/A" ]]; then
-        EMAIL_STATUS="ðŸ”µ N/A"
+        EMAIL_STATUS="N/A"
     elif [[ $EMAIL_QUEUE -gt 100 ]]; then
-        EMAIL_STATUS="ðŸŸ¡ High"
+        EMAIL_STATUS="High"
     else
-        EMAIL_STATUS="ðŸŸ¢ Normal"
+        EMAIL_STATUS="Normal"
     fi
 
-    [[ $RAM_PCT -lt 75 && $DISK_PCT -lt 80 ]] && OVERALL_HEALTH="ðŸŸ¢ Healthy" || OVERALL_HEALTH="ðŸŸ¡ Needs Attention"
+    [[ $RAM_PCT -lt 75 && $DISK_PCT -lt 80 ]] && OVERALL_HEALTH="Healthy" || OVERALL_HEALTH="Needs Attention"
 
     export CPU_STATUS RAM_STATUS DISK_STATUS EMAIL_STATUS OVERALL_HEALTH
 }
@@ -1401,7 +1566,7 @@ generate_smart_summary() {
         && os_lifetime_line="GREEN" \
         || os_lifetime_line="RED"
 
-    if [[ "$EOL_STATUS" == "Supported" && "$PHP_EOL_STATUS" == ðŸŸ¢* ]]; then
+    if [[ "$EOL_STATUS" == "Supported" && "$PHP_EOL_STATUS" == *"Good"* ]]; then
         stack_status="GREEN"
         stack_detail="OS and PHP stack are vendor-supported"
     else
@@ -1498,7 +1663,6 @@ Web Server Uptime : $HTTP_UPTIME
 | IP RDNS | $(portal_status "$RDNS_STATUS") | $RDNS_DETAIL |
 | Malware Scan | $(portal_status "$MALWARE_RESULT_STATUS") | $MALWARE_RESULT_DETAIL |
 | Rootkit Check | $(portal_status "$ROOTKIT_RESULT_STATUS") | $ROOTKIT_RESULT_DETAIL |
-| Outdated CMS Check | $(portal_status "$OUTDATED_CMS_STATUS") | $OUTDATED_CMS_DETAIL |
 | SSH Root Access Security | $(portal_status "$ROOT_LOGIN_STATUS") | PermitRootLogin: $ROOT_LOGIN_RAW \| PasswordAuth: $SSH_PASSWORD_AUTH \| Port(s): $SSH_PORT |
 | PHP Functions Security | $(portal_status "$PHP_FUNC_STATUS") | $PHP_FUNC_DETAIL |
 | Root password health | $(portal_status "$ROOT_PW_STATUS") | Root password ~$DAYS_OLD days old (target: rotated within 90 days) |
@@ -1590,7 +1754,6 @@ generate_detailed_log() {
         report_item "IP RDNS" "$RDNS_STATUS" "$RDNS_DETAIL"
         report_item "Malware Scan" "$MALWARE_RESULT_STATUS" "$MALWARE_RESULT_DETAIL"
         report_item "Rootkit Check" "$ROOTKIT_RESULT_STATUS" "$ROOTKIT_RESULT_DETAIL"
-        report_item "Outdated CMS" "$OUTDATED_CMS_STATUS" "$OUTDATED_CMS_DETAIL"
         report_item "SSH Root Access Security" "$ROOT_LOGIN_STATUS" "PermitRootLogin: $ROOT_LOGIN_RAW; PasswordAuth: $SSH_PASSWORD_AUTH; port(s): $SSH_PORT"
         report_item "PHP Functions Security" "$PHP_FUNC_STATUS" "$PHP_FUNC_DETAIL"
         report_item "Root Password Health" "$ROOT_PW_STATUS" "Changed approximately $DAYS_OLD day(s) ago"
