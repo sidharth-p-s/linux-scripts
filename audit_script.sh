@@ -765,12 +765,15 @@ check_malware_scan_results() {
 
         local age_days
         age_days=$(( ($(date +%s) - $(stat -c %Y "$report" 2>/dev/null || date +%s)) / 86400 ))
+        local age_suffix=""
+        (( age_days > 30 )) && age_suffix=", but report is $age_days day(s) old"
+
         if [[ $malware_count -gt 0 ]]; then
             MALWARE_RESULT_STATUS="Infected"
-            MALWARE_RESULT_DETAIL="$malware_count suspicious file(s) found (last scan: ${rdate:-unknown})"
+            MALWARE_RESULT_DETAIL="$malware_count suspicious file(s) found${age_suffix} (last scan: ${rdate:-unknown})"
         elif (( age_days > 30 )); then
             MALWARE_RESULT_STATUS="Review"
-            MALWARE_RESULT_DETAIL="No malware found, but the scan report is $age_days day(s) old (last scan: ${rdate:-unknown})"
+            MALWARE_RESULT_DETAIL="No malware found${age_suffix} (last scan: ${rdate:-unknown})"
         else
             MALWARE_RESULT_STATUS="Clean"
             MALWARE_RESULT_DETAIL="No malware found (last scan: ${rdate:-unknown})"
@@ -786,12 +789,15 @@ check_malware_scan_results() {
         fi
         local age_days
         age_days=$(( ($(date +%s) - $(stat -c %Y "$old_report" 2>/dev/null || date +%s)) / 86400 ))
+        local age_suffix=""
+        (( age_days > 30 )) && age_suffix=", but report is $age_days day(s) old"
+
         if [[ $cnt -gt 0 ]]; then
             MALWARE_RESULT_STATUS="Infected"
-            MALWARE_RESULT_DETAIL="$cnt suspicious file(s) in $files (last scan: ${rdate:-unknown})"
+            MALWARE_RESULT_DETAIL="$cnt suspicious file(s) in $files${age_suffix} (last scan: ${rdate:-unknown})"
         elif (( age_days > 30 )); then
             MALWARE_RESULT_STATUS="Review"
-            MALWARE_RESULT_DETAIL="No malware found, but the scan report is $age_days day(s) old (last scan: ${rdate:-unknown})"
+            MALWARE_RESULT_DETAIL="No malware found${age_suffix} (last scan: ${rdate:-unknown})"
         else
             MALWARE_RESULT_STATUS="Clean"
             MALWARE_RESULT_DETAIL="No malware found (last scan: ${rdate:-unknown})"
@@ -841,22 +847,23 @@ check_rootkit_scan_results() {
     local log rdate
     local chk_log="" rk_log=""
 
+    # --- chkrootkit: find a non-empty log ---
     for log in /root/scripts/chkrootkit-report.txt /var/log/chkrootkit.log /var/log/chkrootkit/log /var/log/chkrootkit/chkrootkit.log; do
-        [[ -f "$log" ]] && { chk_log="$log"; break; }
+        [[ -f "$log" && -s "$log" ]] && { chk_log="$log"; break; }
     done
 
+    # --- rkhunter: find a non-empty dedicated log ---
     for log in /var/log/rkhunter/rkhunter.log /var/log/rkhunter.log /root/scripts/rkhunter-report.txt; do
-        [[ -f "$log" ]] && { rk_log="$log"; break; }
+        [[ -f "$log" && -s "$log" ]] && { rk_log="$log"; break; }
     done
 
+    # --- chkrootkit parsing ---
     if [[ -n "$chk_log" ]]; then
         rdate=$(date -r "$chk_log" '+%Y-%m-%d %H:%M' 2>/dev/null)
         local infected_lines
         infected_lines=$(grep -i 'INFECTED' "$chk_log" 2>/dev/null | grep -ivE 'not infected|not tested|0 infected' || true)
         local inf_count=0
-        if [[ -n "$infected_lines" ]]; then
-            inf_count=$(wc -l <<<"$infected_lines")
-        fi
+        [[ -n "$infected_lines" ]] && inf_count=$(wc -l <<<"$infected_lines")
 
         if (( inf_count == 0 )); then
             ROOTKIT_RESULT_STATUS="Clean"
@@ -869,31 +876,61 @@ check_rootkit_scan_results() {
         return
     fi
 
+    # --- rkhunter dedicated log parsing ---
     if [[ -n "$rk_log" ]]; then
-        local possible=""
-        possible=$(awk '
-            tolower($0) ~ /possible rootkits[[:space:]]*:/ {
-                value=tolower($0)
-                sub(/.*possible rootkits[[:space:]]*:[[:space:]]*/, "", value)
-                sub(/[^0-9].*/, "", value)
-            }
-            END { print value }
-        ' "$rk_log" 2>/dev/null)
+        local possible
+        possible=$(awk 'tolower($0) ~ /possible rootkits[[:space:]]*:/ {
+            sub(/.*possible rootkits[[:space:]]*:[[:space:]]*/,"",tolower($0))
+            match($0,/[0-9]+/); print substr($0,RSTART,RLENGTH); exit
+        }' "$rk_log" 2>/dev/null)
         if [[ "$possible" =~ ^[0-9]+$ ]]; then
             rdate=$(date -r "$rk_log" '+%Y-%m-%d %H:%M' 2>/dev/null)
-            if (( possible == 0 )); then
+            if (( possible <= 10 )); then
                 ROOTKIT_RESULT_STATUS="Clean"
-                ROOTKIT_RESULT_DETAIL="rkhunter: 0 possible rootkits (last scan: ${rdate:-unknown})"
-            elif (( possible > 10 )); then
-                ROOTKIT_RESULT_STATUS="Infected"
-                ROOTKIT_RESULT_DETAIL="rkhunter: Possible rootkits: $possible (last scan: ${rdate:-unknown})"
+                ROOTKIT_RESULT_DETAIL="rkhunter: $possible possible rootkits (last scan: ${rdate:-unknown})"
             else
+                ROOTKIT_RESULT_STATUS="Infected"
+                ROOTKIT_RESULT_DETAIL="rkhunter: $possible possible rootkits detected (last scan: ${rdate:-unknown})"
+            fi
+            export ROOTKIT_RESULT_STATUS ROOTKIT_RESULT_DETAIL
+            return
+        fi
+    fi
+
+    # --- Fallback: parse combined malware-scan-report.txt ---
+    local combined="/root/scripts/malware-scan-report.txt"
+    if [[ -f "$combined" && -s "$combined" ]]; then
+        rdate=$(date -r "$combined" '+%Y-%m-%d %H:%M' 2>/dev/null)
+
+        # Extract the Rootkit Scan Report section
+        local rk_section
+        rk_section=$(awk '/^Rootkit Scan Report/{found=1; next} found && /^[A-Z].*Report/{exit} found{print}' "$combined" 2>/dev/null)
+
+        # Check if the section exists but has no data lines
+        if grep -qi "Rootkit Scan Report" "$combined" 2>/dev/null; then
+            local possible
+            possible=$(echo "$rk_section" | awk 'tolower($0) ~ /possible rootkits[[:space:]]*:/ {
+                match($0,/[0-9]+/); print substr($0,RSTART,RLENGTH); exit
+            }')
+            local checked
+            checked=$(echo "$rk_section" | awk 'tolower($0) ~ /rootkits checked[[:space:]]*:/ {
+                match($0,/[0-9]+/); print substr($0,RSTART,RLENGTH); exit
+            }')
+
+            if [[ "$possible" =~ ^[0-9]+$ ]]; then
+                if (( possible <= 10 )); then
+                    ROOTKIT_RESULT_STATUS="Clean"
+                    ROOTKIT_RESULT_DETAIL="rkhunter: $possible possible rootkits${checked:+, $checked checked} (last scan: ${rdate:-unknown})"
+                else
+                    ROOTKIT_RESULT_STATUS="Infected"
+                    ROOTKIT_RESULT_DETAIL="rkhunter: $possible possible rootkits detected (last scan: ${rdate:-unknown})"
+                fi
+            else
+                # Section header present but no data lines (empty section)
                 ROOTKIT_RESULT_STATUS="Review"
-                ROOTKIT_RESULT_DETAIL="rkhunter: Possible rootkits: $possible; verify scan result (last scan: ${rdate:-unknown})"
+                ROOTKIT_RESULT_DETAIL="No rootkit scan data in report; run rkhunter manually (last report: ${rdate:-unknown})"
             fi
         fi
-        export ROOTKIT_RESULT_STATUS ROOTKIT_RESULT_DETAIL
-        return
     fi
 
     export ROOTKIT_RESULT_STATUS ROOTKIT_RESULT_DETAIL
