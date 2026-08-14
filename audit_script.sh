@@ -394,6 +394,21 @@ setup_security_tools() {
 # System / resource checks
 #-------------------------------------------------------------------------------
 
+# Format raw ps etime (DD-HH:MM:SS / HH:MM:SS / MM:SS) into human-readable form
+format_etime() {
+    local raw="$1"
+    [[ -z "$raw" ]] && return
+    if [[ "$raw" =~ ^([0-9]+)-([0-9]+):([0-9]+):([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}d ${BASH_REMATCH[2]}h ${BASH_REMATCH[3]}m"
+    elif [[ "$raw" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}h ${BASH_REMATCH[2]}m"
+    elif [[ "$raw" =~ ^([0-9]+):([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}m"
+    else
+        echo "$raw"
+    fi
+}
+
 collect_system_info() {
     echo "[DEBUG] Collecting system resource info..."
     HOSTNAME=$(hostname)
@@ -407,20 +422,6 @@ collect_system_info() {
     local _found_svc="" _found_name="" _ws_state=""
     local _svc_order=("lsws" "openlitespeed" "httpd" "apache2" "nginx" "caddy" "lighttpd")
 
-    # Helper to format raw ps etime into human-readable format
-    format_etime() {
-        local raw="$1"
-        [[ -z "$raw" ]] && return
-        if [[ "$raw" =~ ^([0-9]+)-([0-9]+):([0-9]+):([0-9]+)$ ]]; then
-            echo "${BASH_REMATCH[1]}d ${BASH_REMATCH[2]}h ${BASH_REMATCH[3]}m"
-        elif [[ "$raw" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]]; then
-            echo "${BASH_REMATCH[1]}h ${BASH_REMATCH[2]}m"
-        elif [[ "$raw" =~ ^([0-9]+):([0-9]+)$ ]]; then
-            echo "${BASH_REMATCH[1]}m"
-        else
-            echo "$raw"
-        fi
-    }
 
     # Pass 1: Look for ACTIVE services first
     for _svc in "${_svc_order[@]}"; do
@@ -1322,9 +1323,19 @@ check_ssl_expiry() {
             earliest_date="$enddate"
         fi
     done < <(
-        timeout 5 find /etc/ssl /etc/pki /etc/letsencrypt \
-            -maxdepth 3 -type f \( -name "*.crt" -o -name "*.pem" \) \
-            ! -path "*/certs/*" ! -path "*/ca-trust/*" ! -path "*ca-bundle*" ! -path "*cacert*" 2>/dev/null
+        {
+            # Standard system SSL paths — exclude CA bundles and trust anchors
+            timeout 5 find /etc/ssl /etc/pki \
+                -maxdepth 4 -type f \( -name "*.crt" -o -name "*.pem" \) \
+                ! -path "*/ca-trust/*" ! -path "*ca-bundle*" ! -path "*cacert*" \
+                ! -name "ca-certificates.crt" 2>/dev/null
+            # Let's Encrypt live certificates (depth 3: live/<domain>/fullchain.pem)
+            timeout 3 find /etc/letsencrypt/live -maxdepth 2 -type f \
+                \( -name "fullchain.pem" -o -name "cert.pem" \) 2>/dev/null
+            # nginx / apache vhost certs in common custom locations
+            timeout 3 find /etc/nginx/ssl /etc/apache2/ssl /etc/httpd/ssl \
+                -maxdepth 3 -type f \( -name "*.crt" -o -name "*.pem" \) 2>/dev/null
+        } | sort -u
     )
 
     if [[ -n "$earliest_days" ]]; then
@@ -1606,6 +1617,7 @@ check_php_functions_security() {
     PHP_FUNC_DETAIL="No php.ini files found"
 
     local inis=() ini
+    # System-wide php.ini files
     for ini in \
         /etc/php.ini \
         /etc/php/*/cli/php.ini \
@@ -1614,6 +1626,16 @@ check_php_functions_security() {
         /etc/php/*/cgi/php.ini; do
         [ -f "$ini" ] && inis+=("$ini")
     done
+    # LiteSpeed PHP ini files
+    for ini in /usr/local/lsws/lsphp*/etc/php.ini /usr/local/lsws/lsphp*/etc/php/*/php.ini; do
+        [ -f "$ini" ] && inis+=("$ini")
+    done
+    # PHP-FPM pool configs that may override disable_functions
+    while IFS= read -r ini; do
+        [ -f "$ini" ] && inis+=("$ini")
+    done < <(find /etc/php-fpm.d /etc/php /usr/local/etc/php-fpm.d \
+        -maxdepth 4 -type f -name '*.conf' 2>/dev/null \
+        | xargs grep -l 'disable_functions' 2>/dev/null)
 
     [[ ${#inis[@]} -eq 0 ]] && {
         export PHP_FUNC_STATUS PHP_FUNC_DETAIL
@@ -1675,10 +1697,10 @@ check_rdns_status() {
         RDNS_STATUS="N/A"
         RDNS_DETAIL="Unable to verify (dig/host/nslookup not installed)"
     elif [[ -n "$RDNS" && "$RDNS" != "None" ]]; then
-        RDNS_STATUS="GREEN"
+        RDNS_STATUS="Good"
         RDNS_DETAIL="PTR record: $RDNS"
     else
-        RDNS_STATUS="RED"
+        RDNS_STATUS="Missing"
         RDNS_DETAIL="No PTR record for $MAIN_IP - may affect email delivery"
     fi
 
@@ -1698,7 +1720,7 @@ check_reboot_procedure_info() {
 
 check_resource_usage() {
     echo "[DEBUG] Checking resource usage..."
-    (( $(echo "$LOAD > 5" | bc 2>/dev/null || echo 0) )) && CPU_STATUS="High" || CPU_STATUS="Optimal"
+    (( $(echo "$LOAD > $(nproc 2>/dev/null || echo 4)" | bc 2>/dev/null || echo 0) )) && CPU_STATUS="High" || CPU_STATUS="Optimal"
     [[ $RAM_PCT -gt 80 ]] && RAM_STATUS="High" || RAM_STATUS="Good"
     [[ $DISK_PCT -gt 80 ]] && DISK_STATUS="Critical" || DISK_STATUS="Good"
 
