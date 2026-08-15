@@ -1863,13 +1863,13 @@ get_red_issue_and_rec() {
         "os_kernel_update")
             if [[ "$(portal_status "$SYSTEM_UPDATE_STATUS")" == "RED" || "$(portal_status "$KERNEL_STATUS")" == "RED" ]]; then
                 ITEM_ISSUE="Operating System / Kernel updates available (${KERNEL_UPDATE_COUNT:-0} pending package update(s)):$(get_update_findings_list "$KERNEL_UPDATE_LIST")"
-                ITEM_RECOMMENDATION="PHP and other system package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
+                ITEM_RECOMMENDATION="Kernel and OS updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
             fi
             ;;
         "php_update")
             if [[ $PHP_UPDATE_COUNT -gt 0 ]]; then
                 ITEM_ISSUE="PHP package updates are available ($PHP_UPDATE_COUNT pending update(s)):$(get_update_findings_list "$PHP_UPDATE_LIST")"
-                ITEM_RECOMMENDATION="PHP and other system package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
+                ITEM_RECOMMENDATION="PHP updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
             fi
             ;;
         "cms_update")
@@ -1881,19 +1881,19 @@ get_red_issue_and_rec() {
         "web_server_update")
             if [[ $HTTPD_UPDATE_COUNT -gt 0 ]]; then
                 ITEM_ISSUE="Web server package updates are available ($HTTPD_UPDATE_COUNT pending update(s)):$(get_update_findings_list "$HTTPD_UPDATE_LIST")"
-                ITEM_RECOMMENDATION="PHP and other system package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
+                ITEM_RECOMMENDATION="Web server updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
             fi
             ;;
         "db_server_update")
             if [[ $MYSQL_UPDATE_COUNT -gt 0 ]]; then
                 ITEM_ISSUE="Database server package updates are available ($MYSQL_UPDATE_COUNT pending update(s)):$(get_update_findings_list "$MYSQL_UPDATE_LIST")"
-                ITEM_RECOMMENDATION="PHP and other system package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
+                ITEM_RECOMMENDATION="Database updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
             fi
             ;;
         "other_update")
             if [[ $OTHER_UPDATE_COUNT -gt 0 ]]; then
                 ITEM_ISSUE="Other software updates are available ($OTHER_UPDATE_COUNT pending package(s)):$(get_update_findings_list "$OTHER_UPDATE_LIST")"
-                ITEM_RECOMMENDATION="PHP and other system package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
+                ITEM_RECOMMENDATION="System package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
             fi
             ;;
         "kernel_update")
@@ -2056,7 +2056,9 @@ get_red_issue_and_rec() {
             ;;
         "services")
             if [[ "$(portal_status "$SERVICES_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Essential system services are down ($SERVICES_DOWN)."
+                local svc_down
+                svc_down=$(echo "${SERVICES_DOWN:-}" | sed 's/^[ ,]*//;s/[ ,]*$//')
+                ITEM_ISSUE="Essential system services are down (${svc_down:-Failed services detected})."
                 ITEM_RECOMMENDATION="System services are down. We recommend inspecting service logs and restarting failed services."
             fi
             ;;
@@ -2069,35 +2071,11 @@ get_red_issue_and_rec() {
     esac
 }
 
-smart_summary_cell() {
-    local key="$1" default_detail="$2"
-    get_red_issue_and_rec "$key"
-    if [[ -n "$ITEM_ISSUE" && -n "$ITEM_RECOMMENDATION" ]]; then
-        local clean_issue clean_rec
-        clean_issue=$(echo "$ITEM_ISSUE" | tr '\n' ' ' | sed 's/  */ /g')
-        clean_rec=$(echo "$ITEM_RECOMMENDATION" | tr '\n' ' ' | sed 's/  */ /g')
-        echo "**Issue:** ${clean_issue}<br>**Recommendation:** ${clean_rec}"
-    else
-        echo "$default_detail"
-    fi
-}
+
 
 report_item() {
-    # $1: audit item, $2: raw status, $3: human-readable details, $4: optional key
-    local item_label="$1" raw_status="$2" details="$3" key="${4:-}"
-    local pstat
-    pstat=$(portal_status "$raw_status")
-    printf '  %-38s : %-6s - %s\n' "$item_label" "$pstat" "$details"
-
-    if [[ -n "$key" && "$pstat" == "RED" ]]; then
-        get_red_issue_and_rec "$key"
-        if [[ -n "$ITEM_ISSUE" && -n "$ITEM_RECOMMENDATION" ]]; then
-            echo "    Issue:"
-            echo "$ITEM_ISSUE" | sed 's/^/      /'
-            echo "    Recommendation:"
-            echo "$ITEM_RECOMMENDATION" | sed 's/^/      /'
-        fi
-    fi
+    # $1: audit item, $2: raw status, $3: human-readable details
+    printf '  %-38s : %-6s - %s\n' "$1" "$(portal_status "$2")" "$3"
 }
 
 colorize_report() {
@@ -2124,6 +2102,39 @@ colorize_report() {
         / : CHECK / { sub(/CHECK/, yellow "CHECK" reset) }
         / : N\/A /   { sub(/N\/A/, grey "N/A" reset) }
         { print }
+    '
+}
+
+colorize_recommendations() {
+    if [[ "${NO_COLOR:-}" == "1" ]]; then
+        cat
+        return
+    fi
+
+    local reset bold red green yellow cyan grey
+    reset=$(tput sgr0 2>/dev/null || printf '\033[0m')
+    bold=$(tput bold 2>/dev/null || printf '\033[1m')
+    red=$(tput setaf 1 2>/dev/null || printf '\033[31m')
+    green=$(tput setaf 2 2>/dev/null || printf '\033[32m')
+    yellow=$(tput setaf 3 2>/dev/null || printf '\033[33m')
+    cyan=$(tput setaf 6 2>/dev/null || printf '\033[36m')
+    grey=$(tput setaf 8 2>/dev/null || printf '\033[90m')
+
+    [[ -n "$reset" ]] || reset=$'\033[0m'
+    [[ -n "$bold" ]] || bold=$'\033[1m'
+    [[ -n "$red" ]] || red=$'\033[31m'
+    [[ -n "$green" ]] || green=$'\033[32m'
+    [[ -n "$yellow" ]] || yellow=$'\033[33m'
+    [[ -n "$cyan" ]] || cyan=$'\033[36m'
+    [[ -n "$grey" ]] || grey=$'\033[90m'
+
+    awk -v reset="$reset" -v bold="$bold" -v red="$red" -v green="$green" -v yellow="$yellow" -v cyan="$cyan" -v grey="$grey" '
+        /^=============================================================/ { print cyan bold $0 reset; next }
+        /^[[:space:]]*\[[0-9]+\] Sub Category:/ { print bold yellow $0 reset; next }
+        /^[[:space:]]*Issue:/ { print bold red $0 reset; next }
+        /^[[:space:]]*Recommendation:/ { print bold green $0 reset; next }
+        /^-------------------------------------------------------------/ { print grey $0 reset; next }
+        { print $0 }
     '
 }
 
@@ -2172,11 +2183,11 @@ generate_issues_and_recommendations_log() {
 
     {
         echo "============================================================="
-        echo " BOBCARES AUDIT ISSUES & RECOMMENDATIONS (RED ITEMS)"
-        echo " Generated : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-        echo " Hostname  : $HOSTNAME"
-        echo " Main IP   : $MAIN_IP"
+        echo " ISSUES & RECOMMENDATIONS (RED ITEMS)"
         echo "============================================================="
+        printf '  %-38s : %s\n' "Hostname" "$HOSTNAME"
+        printf '  %-38s : %s\n' "Audit Date" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+        printf '  %-38s : %s\n' "Primary IP" "$MAIN_IP"
         echo
 
         local count=0
@@ -2186,17 +2197,24 @@ generate_issues_and_recommendations_log() {
             get_red_issue_and_rec "$key"
             if [[ -n "$ITEM_ISSUE" && -n "$ITEM_RECOMMENDATION" ]]; then
                 ((count++))
-                echo "[$count] Sub Category: $label ($cat_name)"
-                echo "Issue:"
-                echo "$ITEM_ISSUE"
-                echo "Recommendation:"
-                echo "$ITEM_RECOMMENDATION"
                 echo "-------------------------------------------------------------"
+                echo "  [$count] Sub Category: $label ($cat_name)"
+                echo "-------------------------------------------------------------"
+                echo "    Issue:"
+                echo "$ITEM_ISSUE" | sed 's/^/      /'
+                echo
+                echo "    Recommendation:"
+                echo "$ITEM_RECOMMENDATION" | sed 's/^/      /'
+                echo
             fi
         done
 
         if (( count == 0 )); then
-            echo "No RED issues detected during this audit."
+            echo "-------------------------------------------------------------"
+            echo "  No RED issues detected during this audit."
+            echo "-------------------------------------------------------------"
+        else
+            echo "-------------------------------------------------------------"
         fi
     } > "$RECOMMENDATIONS_FILE"
 }
@@ -2244,36 +2262,36 @@ Web Server Uptime : $HTTP_UPTIME
 
 | Audit Item | Status | Analysis / Recommendation |
 |---|---|---|
-| System Firewall | $(portal_status "$SYSTEM_FIREWALL_STATUS") | $(smart_summary_cell "system_firewall" "$SYSTEM_FIREWALL_ANALYSIS") |
-| Malware Scanner | $(portal_status "$MALWARE_SCANNER_STATUS") | $(smart_summary_cell "malware_scanner" "$MALWARE_SCANNER_DETAIL") |
-| Failed Login Detection | $(portal_status "$BRUTE_STATUS") | $(smart_summary_cell "brute_force" "$BRUTE_REASON") |
-| Web App Firewall | $(portal_status "$MODSEC_STATUS") | $(smart_summary_cell "waf" "$MODSEC_REASON") |
-| Rootkit Scanner | $(portal_status "$ROOTKIT_SCANNER_STATUS") | $(smart_summary_cell "rootkit_scanner" "$ROOTKIT_SCANNER_DETAIL") |
+| System Firewall | $(portal_status "$SYSTEM_FIREWALL_STATUS") | $SYSTEM_FIREWALL_ANALYSIS |
+| Malware Scanner | $(portal_status "$MALWARE_SCANNER_STATUS") | $MALWARE_SCANNER_DETAIL |
+| Failed Login Detection | $(portal_status "$BRUTE_STATUS") | $BRUTE_REASON |
+| Web App Firewall | $(portal_status "$MODSEC_STATUS") | $MODSEC_REASON |
+| Rootkit Scanner | $(portal_status "$ROOTKIT_SCANNER_STATUS") | $ROOTKIT_SCANNER_DETAIL |
 
 ## 2. Software Updates
 
 | Audit Item | Status | Analysis / Recommendation |
 |---|---|---|
-| Operating System / Kernel | $os_update_line | $(smart_summary_cell "os_kernel_update" "$SYSTEM_LATEST") |
-| PHP | $([[ $PHP_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $(smart_summary_cell "php_update" "$PHP_UPDATE_COUNT pending | Installed: $PHP_VERSIONS | Default: $PHP_DEFAULT") |
-| CMS | $(portal_status "$OUTDATED_CMS_STATUS") | $(smart_summary_cell "cms_update" "$OUTDATED_CMS_DETAIL") |
-| Web Server | $([[ $HTTPD_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $(smart_summary_cell "web_server_update" "$HTTPD_UPDATE_COUNT pending web server update(s)") |
-| Database Server | $([[ $MYSQL_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $(smart_summary_cell "db_server_update" "$MYSQL_UPDATE_COUNT pending DB update(s)") |
-| Other Softwares | $other_line | $(smart_summary_cell "other_update" "$OTHER_UPDATE_COUNT other pending package(s)${OTHER_UPDATE_PKGS:+: $OTHER_UPDATE_PKGS}") |
-| Kernel | $(portal_status "$KERNEL_STATUS") | $(smart_summary_cell "kernel_update" "Running: $KERNEL_RUNNING | Update: $KERNEL_UPDATE_AVAILABLE | KernelCare: $KC_STATUS") |
-| Reboot Required | $(portal_status "$REBOOT_STATUS") | $(smart_summary_cell "reboot_required" "$REBOOT_REASON") |
+| Operating System / Kernel | $os_update_line | $SYSTEM_LATEST |
+| PHP | $([[ $PHP_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $PHP_UPDATE_COUNT pending \| Installed: $PHP_VERSIONS \| Default: $PHP_DEFAULT |
+| CMS | $(portal_status "$OUTDATED_CMS_STATUS") | $OUTDATED_CMS_DETAIL |
+| Web Server | $([[ $HTTPD_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $HTTPD_UPDATE_COUNT pending web server update(s) |
+| Database Server | $([[ $MYSQL_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $MYSQL_UPDATE_COUNT pending DB update(s) |
+| Other Softwares | $other_line | $OTHER_UPDATE_COUNT other pending package(s)${OTHER_UPDATE_PKGS:+: $OTHER_UPDATE_PKGS} |
+| Kernel | $(portal_status "$KERNEL_STATUS") | Running: $KERNEL_RUNNING \| Update: $KERNEL_UPDATE_AVAILABLE \| KernelCare: $KC_STATUS |
+| Reboot Required | $(portal_status "$REBOOT_STATUS") | $REBOOT_REASON |
 
 ## 3. Server Health
 
 | Audit Item | Status | Details |
 |---|---|---|
 | Server Uptime | $(portal_status "$UPTIME_STATUS") | $UPTIME |
-| HTTP Uptime | $(portal_status "$HTTP_STATUS") | $(smart_summary_cell "http_uptime" "$HTTP_UPTIME") |
-| CPU Usage | $(portal_status "$CPU_STATUS") | $(smart_summary_cell "cpu_usage" "Load average: $LOAD") |
-| RAM Usage | $(portal_status "$RAM_STATUS") | $(smart_summary_cell "ram_usage" "Used: ${RAM_PCT}%") |
-| Disc Space Usage | $(portal_status "$DISK_STATUS") | $(smart_summary_cell "disk_space" "Used: ${DISK_PCT}%") |
-| Email Queue | $(portal_status "$EMAIL_STATUS") | $(smart_summary_cell "email_queue" "Queued messages: $EMAIL_QUEUE") |
-| IP Reputation | $(portal_status "$IP_REPUTATION_STATUS") | $(smart_summary_cell "ip_reputation" "$IP_REPUTATION_DETAIL") |
+| HTTP Uptime | $(portal_status "$HTTP_STATUS") | $HTTP_UPTIME |
+| CPU Usage | $(portal_status "$CPU_STATUS") | Load average: $LOAD |
+| RAM Usage | $(portal_status "$RAM_STATUS") | Used: ${RAM_PCT}% |
+| Disc Space Usage | $(portal_status "$DISK_STATUS") | Used: ${DISK_PCT}% |
+| Email Queue | $(portal_status "$EMAIL_STATUS") | Queued messages: $EMAIL_QUEUE |
+| IP Reputation | $(portal_status "$IP_REPUTATION_STATUS") | $IP_REPUTATION_DETAIL |
 
 **Overall Server Health:** $OVERALL_HEALTH
 
@@ -2281,36 +2299,36 @@ Web Server Uptime : $HTTP_UPTIME
 
 | Audit Item | Status | Details |
 |---|---|---|
-| Local Backup | $(portal_status "$BACKUP_STATUS") | $(smart_summary_cell "local_backup" "$BACKUP_DETAIL") |
-| Remote Backup | $(portal_status "$BACKUP_REMOTE_STATUS") | $(smart_summary_cell "remote_backup" "$BACKUP_REMOTE_DETAIL") |
-| Daily Backup | $(portal_status "$BACKUP_DAILY_STATUS") | $(smart_summary_cell "daily_backup" "$BACKUP_DAILY_DETAIL") |
-| Weekly Backup | $(portal_status "$BACKUP_WEEKLY_STATUS") | $(smart_summary_cell "weekly_backup" "$BACKUP_WEEKLY_DETAIL") |
-| Monthly Backup | $(portal_status "$BACKUP_MONTHLY_STATUS") | $(smart_summary_cell "monthly_backup" "$BACKUP_MONTHLY_DETAIL") |
-| Backup Retention | $(portal_status "$BACKUP_RETENTION_STATUS") | $(smart_summary_cell "backup_retention" "$BACKUP_RETENTION_DETAIL") |
-| Recent Last Backup | $(portal_status "$BACKUP_LAST_STATUS") | $(smart_summary_cell "backup_last" "$BACKUP_LAST_DETAIL") |
-| Size Of Last Backup | $(portal_status "$BACKUP_SIZE_STATUS") | $(smart_summary_cell "backup_size" "$BACKUP_SIZE_DETAIL") |
+| Local Backup | $(portal_status "$BACKUP_STATUS") | $BACKUP_DETAIL |
+| Remote Backup | $(portal_status "$BACKUP_REMOTE_STATUS") | $BACKUP_REMOTE_DETAIL |
+| Daily Backup | $(portal_status "$BACKUP_DAILY_STATUS") | $BACKUP_DAILY_DETAIL |
+| Weekly Backup | $(portal_status "$BACKUP_WEEKLY_STATUS") | $BACKUP_WEEKLY_DETAIL |
+| Monthly Backup | $(portal_status "$BACKUP_MONTHLY_STATUS") | $BACKUP_MONTHLY_DETAIL |
+| Backup Retention | $(portal_status "$BACKUP_RETENTION_STATUS") | $BACKUP_RETENTION_DETAIL |
+| Recent Last Backup | $(portal_status "$BACKUP_LAST_STATUS") | $BACKUP_LAST_DETAIL |
+| Size Of Last Backup | $(portal_status "$BACKUP_SIZE_STATUS") | $BACKUP_SIZE_DETAIL |
 
 ## 5. Software Life Time
 
 | Audit Item | Status | Details |
 |---|---|---|
 | Control Panel | $cp_lt_status | $cp_lt_detail |
-| Operating System | $os_lifetime_line | $(smart_summary_cell "os_eol" "$OS_NAME $OS_VERSION - $EOL_STATUS by vendor") |
-| CMS | $(portal_status "$OUTDATED_CMS_STATUS") | $(smart_summary_cell "cms_update" "$OUTDATED_CMS_DETAIL") |
-| Software Stack | $stack_status | $(smart_summary_cell "software_stack" "$stack_detail") |
+| Operating System | $os_lifetime_line | $OS_NAME $OS_VERSION - $EOL_STATUS by vendor |
+| CMS | $(portal_status "$OUTDATED_CMS_STATUS") | $OUTDATED_CMS_DETAIL |
+| Software Stack | $stack_status | $stack_detail |
 
 ## 6. Proactive Defence
 
 | Audit Item | Status | Details |
 |---|---|---|
-| /tmp Security | $(portal_status "$TMP_SEC_STATUS") | $(smart_summary_cell "tmp_security" "$TMP_SEC_DETAIL") |
-| Reboot Procedure | $(portal_status "$REBOOT_PROC_STATUS") | $(smart_summary_cell "reboot_procedure" "$REBOOT_PROC_DETAIL") |
-| IP RDNS | $(portal_status "$RDNS_STATUS") | $(smart_summary_cell "ip_rdns" "$RDNS_DETAIL") |
-| Malware Scan | $(portal_status "$MALWARE_RESULT_STATUS") | $(smart_summary_cell "malware_scan" "$MALWARE_RESULT_DETAIL") |
-| Rootkit Check | $(portal_status "$ROOTKIT_RESULT_STATUS") | $(smart_summary_cell "rootkit_check" "$ROOTKIT_RESULT_DETAIL") |
-| SSH Root Access Security | $(portal_status "$ROOT_LOGIN_STATUS") | $(smart_summary_cell "ssh_root" "PermitRootLogin: $ROOT_LOGIN_RAW | PasswordAuth: $SSH_PASSWORD_AUTH | Port(s): $SSH_PORT") |
-| PHP Functions Security | $(portal_status "$PHP_FUNC_STATUS") | $(smart_summary_cell "php_functions" "$PHP_FUNC_DETAIL") |
-| Root password health | $(portal_status "$ROOT_PW_STATUS") | $(smart_summary_cell "root_password" "Root password ~$DAYS_OLD days old (target: rotated within 90 days)") |
+| /tmp Security | $(portal_status "$TMP_SEC_STATUS") | $TMP_SEC_DETAIL |
+| Reboot Procedure | $(portal_status "$REBOOT_PROC_STATUS") | $REBOOT_PROC_DETAIL |
+| IP RDNS | $(portal_status "$RDNS_STATUS") | $RDNS_DETAIL |
+| Malware Scan | $(portal_status "$MALWARE_RESULT_STATUS") | $MALWARE_RESULT_DETAIL |
+| Rootkit Check | $(portal_status "$ROOTKIT_RESULT_STATUS") | $ROOTKIT_RESULT_DETAIL |
+| SSH Root Access Security | $(portal_status "$ROOT_LOGIN_STATUS") | PermitRootLogin: $ROOT_LOGIN_RAW \| PasswordAuth: $SSH_PASSWORD_AUTH \| Port(s): $SSH_PORT |
+| PHP Functions Security | $(portal_status "$PHP_FUNC_STATUS") | $PHP_FUNC_DETAIL |
+| Root password health | $(portal_status "$ROOT_PW_STATUS") | Root password ~$DAYS_OLD days old (target: rotated within 90 days) |
 
 ---
 
@@ -2318,8 +2336,8 @@ Web Server Uptime : $HTTP_UPTIME
 
 | Check | Status | Details |
 |---|---|---|
-| Services | $(portal_status "$SERVICES_STATUS") | $(smart_summary_cell "services" "$SERVICES_DOWN") |
-| SSL Certificates | $(portal_status "$SSL_STATUS") | $(smart_summary_cell "ssl_certificates" "$SSL_EXPIRY") |
+| Services | $(portal_status "$SERVICES_STATUS") | $SERVICES_DOWN |
+| SSL Certificates | $(portal_status "$SSL_STATUS") | $SSL_EXPIRY |
 | User Accounts | N/A | Total: $ACCT_COUNT | Locked: $ACCT_SUSPENDED |
 | Malware Scan Setup | N/A | $SECURITY_ACTIONS Scan: $MALWARE_SCAN_STARTED |
 
@@ -2523,9 +2541,7 @@ main() {
 
     if [[ -s "$RECOMMENDATIONS_FILE" ]] && grep -q "Sub Category:" "$RECOMMENDATIONS_FILE"; then
         echo
-        echo "=================== ISSUES & RECOMMENDATIONS ==================="
-        cat "$RECOMMENDATIONS_FILE"
-        echo "================================================================"
+        colorize_recommendations < "$RECOMMENDATIONS_FILE"
     fi
 
     echo
