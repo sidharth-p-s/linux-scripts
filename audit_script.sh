@@ -1615,78 +1615,113 @@ check_php_eol() {
 check_php_functions_security() {
     echo "[DEBUG] Checking PHP functions security..."
     PHP_FUNC_STATUS="Unknown"
-    PHP_FUNC_DETAIL="No php.ini files found"
+    PHP_FUNC_DETAIL="No php.ini files or PHP binaries found"
 
-    local inis=() ini
-    # System-wide php.ini files
-    for ini in \
-        /etc/php.ini \
-        /etc/php/*/cli/php.ini \
-        /etc/php/*/fpm/php.ini \
-        /etc/php/*/apache2/php.ini \
-        /etc/php/*/cgi/php.ini; do
-        [ -f "$ini" ] && inis+=("$ini")
-    done
-    # LiteSpeed PHP ini files
-    for ini in /usr/local/lsws/lsphp*/etc/php.ini /usr/local/lsws/lsphp*/etc/php/*/php.ini; do
-        [ -f "$ini" ] && inis+=("$ini")
-    done
+    local raw_inis=() ini
+    # System-wide php.ini files search across common directories
+    while IFS= read -r ini; do
+        [[ -f "$ini" ]] && raw_inis+=("$ini")
+    done < <(find /etc /usr/local /opt /usr -maxdepth 6 -type f -name 'php.ini' 2>/dev/null)
+
+    # Query installed PHP executables for loaded php.ini
+    local php_bins=()
+    while IFS= read -r pbin; do
+        [[ -x "$pbin" ]] && php_bins+=("$pbin")
+        local loaded_ini
+        loaded_ini=$("$pbin" --ini 2>/dev/null | awk -F: '/Loaded Configuration File:/{print $2}' | tr -d ' \t\r\n')
+        if [[ -n "$loaded_ini" && -f "$loaded_ini" && "$loaded_ini" != "(none)" ]]; then
+            raw_inis+=("$loaded_ini")
+        fi
+    done < <(find /usr /opt /usr/local -type f -name 'php*' -executable 2>/dev/null | grep -E '/bin/php[0-9.]*$' || true)
+
     # PHP-FPM pool configs that may override disable_functions
     while IFS= read -r ini; do
-        [ -f "$ini" ] && inis+=("$ini")
-    done < <(find /etc/php-fpm.d /etc/php /usr/local/etc/php-fpm.d \
-        -maxdepth 4 -type f -name '*.conf' 2>/dev/null \
-        | xargs grep -l 'disable_functions' 2>/dev/null)
+        [[ -f "$ini" ]] && raw_inis+=("$ini")
+    done < <(find /etc /usr/local /opt -maxdepth 6 -type f -name '*.conf' 2>/dev/null | xargs grep -l 'disable_functions' 2>/dev/null || true)
 
-    [[ ${#inis[@]} -eq 0 ]] && {
+    local inis=()
+    if [[ ${#raw_inis[@]} -gt 0 ]]; then
+        mapfile -t inis < <(printf '%s\n' "${raw_inis[@]}" | sort -u | grep -v '^$')
+    fi
+
+    if [[ ${#inis[@]} -eq 0 && ${#php_bins[@]} -eq 0 ]]; then
         export PHP_FUNC_STATUS PHP_FUNC_DETAIL
         return
-    }
+    fi
 
     local fully_secured=0 partial_secured=0 insecure=()
     local funcs=("exec" "shell_exec" "system" "passthru")
 
-    for ini in "${inis[@]}"; do
-        local df
-        df=$(awk -F= '/^[[:space:]]*disable_functions[[:space:]]*=/{print $2}' "$ini" 2>/dev/null | tail -1 | tr -d ' "')
+    if [[ ${#inis[@]} -gt 0 ]]; then
+        for ini in "${inis[@]}"; do
+            local df
+            df=$(grep -iE '^[[:space:]]*disable_functions[[:space:]]*=' "$ini" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d ' "')
 
-        if [[ -z "$df" ]]; then
-            insecure+=("$ini")
-            continue
-        fi
+            if [[ -z "$df" ]]; then
+                insecure+=("$ini")
+                continue
+            fi
 
-        local missing=()
-        local matched=0
-        for f in "${funcs[@]}"; do
-            if grep -qE "(^|,)${f}(,|$)" <<<"$df"; then
-                ((matched++))
+            local matched=0
+            for f in "${funcs[@]}"; do
+                if grep -qE "(^|,)${f}(,|$)" <<<"$df"; then
+                    ((matched++))
+                fi
+            done
+
+            if (( matched == ${#funcs[@]} )); then
+                ((fully_secured++))
+            elif (( matched > 0 )); then
+                ((partial_secured++))
+                insecure+=("$ini")
             else
-                missing+=("$f")
+                insecure+=("$ini")
             fi
         done
+    fi
 
-        if (( matched == ${#funcs[@]} )); then
-            ((fully_secured++))
-        elif (( matched > 0 )); then
-            ((partial_secured++))
-            insecure+=("$ini")
-        else
-            insecure+=("$ini")
-        fi
-    done
+    if [[ ${#php_bins[@]} -gt 0 ]]; then
+        for pbin in "${php_bins[@]}"; do
+            local runtime_df
+            runtime_df=$("$pbin" -r "echo ini_get('disable_functions');" 2>/dev/null | tr -d ' ')
+            if [[ -z "$runtime_df" ]]; then
+                insecure+=("$pbin")
+                continue
+            fi
 
-    if [[ ${#insecure[@]} -eq 0 ]]; then
+            local matched=0
+            for f in "${funcs[@]}"; do
+                if grep -qE "(^|,)${f}(,|$)" <<<"$runtime_df"; then
+                    ((matched++))
+                fi
+            done
+
+            if (( matched == ${#funcs[@]} )); then
+                ((fully_secured++))
+            elif (( matched > 0 )); then
+                ((partial_secured++))
+                insecure+=("$pbin")
+            else
+                insecure+=("$pbin")
+            fi
+        done
+    fi
+
+    local insecure_uniq=()
+    if [[ ${#insecure[@]} -gt 0 ]]; then
+        mapfile -t insecure_uniq < <(printf '%s\n' "${insecure[@]}" | sort -u | grep -v '^$')
+    fi
+    PHP_INSECURE_LIST=$(printf '%s, ' "${insecure_uniq[@]}" | sed 's/, $//')
+
+    if [[ ${#insecure_uniq[@]} -eq 0 && fully_secured -gt 0 ]]; then
         PHP_FUNC_STATUS="Good"
-        PHP_FUNC_DETAIL="Dangerous functions (exec, shell_exec, system, passthru) disabled in all ${#inis[@]} php.ini file(s)"
-    elif (( fully_secured > 0 || partial_secured > 0 )); then
-        PHP_FUNC_STATUS="Partial"
-        PHP_FUNC_DETAIL="disable_functions incomplete or missing exec/system in: ${insecure[*]}"
+        PHP_FUNC_DETAIL="Dangerous functions (exec, shell_exec, system, passthru) disabled in all PHP environments"
     else
         PHP_FUNC_STATUS="Not set"
         PHP_FUNC_DETAIL="Dangerous PHP functions (exec, shell_exec, system, passthru) are not disabled"
     fi
 
-    export PHP_FUNC_STATUS PHP_FUNC_DETAIL
+    export PHP_FUNC_STATUS PHP_FUNC_DETAIL PHP_INSECURE_LIST
 }
 
 #-------------------------------------------------------------------------------
@@ -1953,7 +1988,7 @@ get_red_issue_and_rec() {
         "remote_backup")
             if [[ "$(portal_status "$BACKUP_REMOTE_STATUS")" == "RED" ]]; then
                 ITEM_ISSUE="Remote backup not found on the server ($BACKUP_REMOTE_DETAIL)."
-                ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
+                ITEM_RECOMMENDATION="Remote backup is not configured on the server. We recommend configuring remote backups so that in case of complete server or hardware failure where local backups cannot be recovered, you can safely restore your accounts from an offsite copy."
             fi
             ;;
         "daily_backup")
@@ -2044,7 +2079,11 @@ get_red_issue_and_rec() {
             ;;
         "php_functions")
             if [[ "$(portal_status "$PHP_FUNC_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="PHP dangerous functions are found to be enabled in the server ($PHP_FUNC_DETAIL)."
+                local issue_detail="$PHP_FUNC_DETAIL"
+                if [[ -n "${PHP_INSECURE_LIST:-}" ]]; then
+                    issue_detail="Dangerous PHP functions (exec, shell_exec, system, passthru) are not disabled in: $PHP_INSECURE_LIST"
+                fi
+                ITEM_ISSUE="PHP dangerous functions are found to be enabled on the server ($issue_detail)."
                 ITEM_RECOMMENDATION="PHP dangerous functions are found to be enabled in the server. Dangerous PHP functions can cause security issues on the server. They must be disabled for preventing unauthorized execution of code on the server."
             fi
             ;;
@@ -2052,14 +2091,6 @@ get_red_issue_and_rec() {
             if [[ "$(portal_status "$ROOT_PW_STATUS")" == "RED" ]]; then
                 ITEM_ISSUE="Root password has not been updated within 90 days (approximately $DAYS_OLD days old)."
                 ITEM_RECOMMENDATION="We recommend updating root password every 90 days to enhance server security."
-            fi
-            ;;
-        "services")
-            if [[ "$(portal_status "$SERVICES_STATUS")" == "RED" ]]; then
-                local svc_down
-                svc_down=$(echo "${SERVICES_DOWN:-}" | sed 's/^[ ,]*//;s/[ ,]*$//')
-                ITEM_ISSUE="Essential system services are down (${svc_down:-Failed services detected})."
-                ITEM_RECOMMENDATION="System services are down. We recommend inspecting service logs and restarting failed services."
             fi
             ;;
         "ssl_certificates")
@@ -2176,7 +2207,6 @@ generate_issues_and_recommendations_log() {
         "SSH Root Access Security|ssh_root|Proactive Defence"
         "PHP Functions Security|php_functions|Proactive Defence"
         "Root Password Health|root_password|Proactive Defence"
-        "System Services|services|Additional Checks"
         "SSL Certificates|ssl_certificates|Additional Checks"
     )
 
@@ -2536,6 +2566,8 @@ main() {
     echo "Recommendations Log  : $RECOMMENDATIONS_FILE"
     echo "Smart Summary        : $SUMMARY_FILE"
     echo "Detailed Log         : $DETAILED_FILE"
+    echo "Malware Details Log  : /root/scripts/malware-details-report.txt"
+    echo "Malware Scan Report  : /root/scripts/malware-scan-report.txt"
     echo "Debug Log            : $DEBUG_LOG"
 
     if [[ -s "$RECOMMENDATIONS_FILE" ]] && grep -q "Sub Category:" "$RECOMMENDATIONS_FILE"; then
@@ -2549,6 +2581,10 @@ main() {
     echo "[INFO]    Audit report files are available in:"
     echo "          /root/scripts/"
     echo "          Please review them before submitting to the Bobcares portal."
+    echo
+    echo "[INFO]    Malware scan reports can be found at:"
+    echo "          - /root/scripts/malware-details-report.txt"
+    echo "          - /root/scripts/malware-scan-report.txt"
     echo
     echo "[WARNING] System updates and malware scan results are read-only."
     echo "          Any issues found require manual intervention."
