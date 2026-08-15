@@ -2151,7 +2151,6 @@ generate_issues_and_recommendations_log() {
         "Web Server Updates|web_server_update|Software Updates"
         "Database Server Updates|db_server_update|Software Updates"
         "Other Software Updates|other_update|Software Updates"
-        "Kernel Updates|kernel_update|Software Updates"
         "Reboot Required|reboot_required|Software Updates"
         "HTTP Uptime|http_uptime|Server Health"
         "CPU Usage|cpu_usage|Server Health"
