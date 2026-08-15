@@ -17,6 +17,7 @@ mkdir -p "$SCRIPT_DIR"
 SUMMARY_FILE="$SCRIPT_DIR/audit-smart-summary.md"
 DETAILED_FILE="$SCRIPT_DIR/report-detailed.log"
 FINDINGS_FILE="$SCRIPT_DIR/audit-findings.log"
+RECOMMENDATIONS_FILE="$SCRIPT_DIR/audit-issues-recommendations.log"
 DEBUG_LOG="$SCRIPT_DIR/audit-debug.log"
 
 STATE_DIR=$(mktemp -d /tmp/bc-audit.XXXXXX)
@@ -1755,14 +1756,351 @@ portal_status() {
     esac
 }
 
+get_formatted_eol_php() {
+    local v e found=()
+    for v in $(echo "$PHP_VERSIONS" | tr ',' ' '); do
+        v=$(echo "$v" | xargs)
+        [[ -z "$v" ]] && continue
+        [[ "$v" =~ ^([0-9]+\.[0-9]+) ]] && v="${BASH_REMATCH[1]}"
+        for e in "${PHP_EOL_LIST[@]}"; do
+            if [[ "$v" == "$e" ]]; then
+                local exists=0
+                for f in "${found[@]}"; do [[ "$f" == "$v" ]] && exists=1 && break; done
+                [[ $exists -eq 0 ]] && found+=("$v")
+                break
+            fi
+        done
+    done
+
+    if [[ ${#found[@]} -eq 0 ]]; then
+        echo "PHP"
+        return
+    fi
+
+    local res=""
+    local i
+    for (( i=0; i<${#found[@]}; i++ )); do
+        if (( i == 0 )); then
+            res="PHP ${found[i]}"
+        elif (( i == ${#found[@]} - 1 )); then
+            res="${res} and PHP ${found[i]}"
+        else
+            res="${res}, PHP ${found[i]}"
+        fi
+    done
+    echo "$res"
+}
+
+get_malware_findings_list() {
+    local list=""
+    if [[ -f /root/scripts/malware-details-report.txt ]]; then
+        list=$(grep '^File: ' /root/scripts/malware-details-report.txt 2>/dev/null | head -20)
+    elif [[ -f /root/scripts/malware-files.txt ]]; then
+        list=$(grep -vE '^[[:space:]]*(#|$)' /root/scripts/malware-files.txt 2>/dev/null | head -20)
+    fi
+    if [[ -n "$list" ]]; then
+        printf '\nFindings Log entries:\n%s' "$list"
+    fi
+}
+
+get_cms_findings_list() {
+    local list=""
+    if [[ -f /root/scripts/outdated-cms-report.txt ]]; then
+        list=$(cat /root/scripts/outdated-cms-report.txt 2>/dev/null | head -20)
+    elif [[ -f /root/scripts/malware-scan-report.txt ]] && grep -qi "Outdated CMS" /root/scripts/malware-scan-report.txt; then
+        list=$(grep -E '^\s*(PHPMailer|WordPress|Joomla|Drupal|Magento|PrestaShop|OpenCart|Shopify|WooCommerce)[[:space:]]+[0-9]' /root/scripts/malware-scan-report.txt 2>/dev/null | head -20)
+    fi
+    if [[ -n "$list" ]]; then
+        printf '\nFindings Log entries:\n%s' "$list"
+    fi
+}
+
+get_update_findings_list() {
+    local input="$1"
+    if [[ -n "$input" ]]; then
+        local head_out
+        head_out=$(echo "$input" | head -15)
+        printf '\nFindings Log entries:\n%s' "$head_out"
+    fi
+}
+
+get_red_issue_and_rec() {
+    local key="$1"
+    ITEM_ISSUE=""
+    ITEM_RECOMMENDATION=""
+
+    case "$key" in
+        "system_firewall")
+            if [[ "$(portal_status "$SYSTEM_FIREWALL_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Firewall and CSF are not installed or active on the server (${SYSTEM_FIREWALL_ANALYSIS:-No active firewall detected})."
+                ITEM_RECOMMENDATION="Firewall and CSF are not installed or active on the server. Kindly let us know if we can enable it."
+            fi
+            ;;
+        "malware_scanner")
+            if [[ "$(portal_status "$MALWARE_SCANNER_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Automated malware scanner is missing or inactive on the server ($MALWARE_SCANNER_DETAIL)."
+                ITEM_RECOMMENDATION="Automated malware scanner is missing or inactive on the server. We recommend installing ClamAV and setting up regular malware scanning."
+            fi
+            ;;
+        "brute_force")
+            if [[ "$(portal_status "$BRUTE_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Failed login detection is not active on the server ($BRUTE_REASON)."
+                ITEM_RECOMMENDATION="Failed login detection is not enabled on the server. We recommend enabling Fail2Ban to protect the server against brute-force login attempts."
+            fi
+            ;;
+        "waf")
+            if [[ "$(portal_status "$MODSEC_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Web Application Firewall (ModSecurity) is disabled on your server ($MODSEC_REASON)."
+                ITEM_RECOMMENDATION="Mod_Security is disabled. It is reccomended to enable mod_security to protect web applications from attacks. Web Application Firewall(ModSecurity) is disabled on your server. Web Application Firewall is used to protect web server from various types of attacks such as XSS, bots, SQL-injection, capture session, trojans, session hijacking, etc. Please confirm if you want this enabled."
+            fi
+            ;;
+        "rootkit_scanner")
+            if [[ "$(portal_status "$ROOTKIT_SCANNER_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Rootkit scanner tools are missing on the server ($ROOTKIT_SCANNER_DETAIL)."
+                ITEM_RECOMMENDATION="Rootkit scanner is missing on the server. We recommend installing rkhunter and chkrootkit to scan for potential rootkit infections."
+            fi
+            ;;
+        "os_kernel_update")
+            if [[ "$(portal_status "$SYSTEM_UPDATE_STATUS")" == "RED" || "$(portal_status "$KERNEL_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Operating System / Kernel updates available (${KERNEL_UPDATE_COUNT:-0} pending package update(s)):$(get_update_findings_list "$KERNEL_UPDATE_LIST")"
+                ITEM_RECOMMENDATION="PHP and other system package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
+            fi
+            ;;
+        "php_update")
+            if [[ $PHP_UPDATE_COUNT -gt 0 ]]; then
+                ITEM_ISSUE="PHP package updates are available ($PHP_UPDATE_COUNT pending update(s)):$(get_update_findings_list "$PHP_UPDATE_LIST")"
+                ITEM_RECOMMENDATION="PHP and other system package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
+            fi
+            ;;
+        "cms_update")
+            if [[ "$(portal_status "$OUTDATED_CMS_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Detected websites with outdated CMS installations:$(get_cms_findings_list)"
+                ITEM_RECOMMENDATION="Detected websites with outdated CMS installations. Please note that outdated CMS are always prone to hacking and attacks. You need to update the CMS to the latest version in order to avoid further attacks in the server."
+            fi
+            ;;
+        "web_server_update")
+            if [[ $HTTPD_UPDATE_COUNT -gt 0 ]]; then
+                ITEM_ISSUE="Web server package updates are available ($HTTPD_UPDATE_COUNT pending update(s)):$(get_update_findings_list "$HTTPD_UPDATE_LIST")"
+                ITEM_RECOMMENDATION="PHP and other system package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
+            fi
+            ;;
+        "db_server_update")
+            if [[ $MYSQL_UPDATE_COUNT -gt 0 ]]; then
+                ITEM_ISSUE="Database server package updates are available ($MYSQL_UPDATE_COUNT pending update(s)):$(get_update_findings_list "$MYSQL_UPDATE_LIST")"
+                ITEM_RECOMMENDATION="PHP and other system package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
+            fi
+            ;;
+        "other_update")
+            if [[ $OTHER_UPDATE_COUNT -gt 0 ]]; then
+                ITEM_ISSUE="Other software updates are available ($OTHER_UPDATE_COUNT pending package(s)):$(get_update_findings_list "$OTHER_UPDATE_LIST")"
+                ITEM_RECOMMENDATION="PHP and other system package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
+            fi
+            ;;
+        "kernel_update")
+            if [[ "$(portal_status "$KERNEL_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Kernel updates are available ($KERNEL_ANALYSIS):$(get_update_findings_list "$KERNEL_UPDATE_LIST")"
+                ITEM_RECOMMENDATION="Pending kernel updates are available. We recommend scheduling the kernel update during off-peak hours, as a reboot will be required."
+            fi
+            ;;
+        "reboot_required")
+            if [[ "$(portal_status "$REBOOT_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Reboot required on server ($REBOOT_REASON)."
+                ITEM_RECOMMENDATION="Pending system kernel or core package updates require a system reboot. We recommend scheduling the server reboot during off-peak hours to minimize service downtime."
+            fi
+            ;;
+        "http_uptime")
+            if [[ "$(portal_status "$HTTP_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Web server service is stopped or failed ($HTTP_STATUS)."
+                ITEM_RECOMMENDATION="Web server service is down. We recommend checking web server error logs and restarting the web service."
+            fi
+            ;;
+        "cpu_usage")
+            if [[ "$(portal_status "$CPU_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Server CPU load average is critical (Load: $LOAD)."
+                ITEM_RECOMMENDATION="Server is generating large number of alerts, indicating serious health issues for the server."
+            fi
+            ;;
+        "ram_usage")
+            if [[ "$(portal_status "$RAM_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Server RAM utilization is high (${RAM_PCT}% used)."
+                ITEM_RECOMMENDATION="Server is generating large number of alerts, indicating serious health issues for the server."
+            fi
+            ;;
+        "disk_space")
+            if [[ "$(portal_status "$DISK_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="The disk space is critical on the server, it is reached ${DISK_PCT}% under '/' directory."
+                ITEM_RECOMMENDATION="The disk space is critical on the server, it is reached ${DISK_PCT}% under '/' directory. We recommend clearing unnecessary files or extending disk space."
+            fi
+            ;;
+        "email_queue")
+            if [[ "$(portal_status "$EMAIL_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Email queue backlog is high ($EMAIL_QUEUE messages)."
+                ITEM_RECOMMENDATION="Email queue is generating large number of alerts. We recommend inspecting queue messages for potential spam script execution."
+            fi
+            ;;
+        "ip_reputation")
+            if [[ "$(portal_status "$IP_REPUTATION_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="IP address of the server ($MAIN_IP) is blocked in BARRACUDA and SORBS SPAM ($IP_REPUTATION_DETAIL)."
+                ITEM_RECOMMENDATION="IP address of the server is blocked in BARRACUDA and SORBS SPAM. Kindly check mail logs and apply for delisting."
+            fi
+            ;;
+        "local_backup")
+            if [[ "$(portal_status "$BACKUP_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Local backup not found on the server ($BACKUP_DETAIL)."
+                ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
+            fi
+            ;;
+        "remote_backup")
+            if [[ "$(portal_status "$BACKUP_REMOTE_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Remote backup not found on the server ($BACKUP_REMOTE_DETAIL)."
+                ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
+            fi
+            ;;
+        "daily_backup")
+            if [[ "$(portal_status "$BACKUP_DAILY_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Daily backup schedule is not configured on the server."
+                ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
+            fi
+            ;;
+        "weekly_backup")
+            if [[ "$(portal_status "$BACKUP_WEEKLY_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Weekly backup schedule is not configured on the server."
+                ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
+            fi
+            ;;
+        "monthly_backup")
+            if [[ "$(portal_status "$BACKUP_MONTHLY_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Monthly backup schedule is not configured on the server."
+                ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
+            fi
+            ;;
+        "backup_retention")
+            if [[ "$(portal_status "$BACKUP_RETENTION_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Backup retention schedule is not configured on the server."
+                ITEM_RECOMMENDATION="We recommend defining a proper backup retention policy to keep safe recovery points."
+            fi
+            ;;
+        "backup_last")
+            if [[ "$(portal_status "$BACKUP_LAST_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Recent backup archive is stale or missing ($BACKUP_LAST_DETAIL)."
+                ITEM_RECOMMENDATION="Backup is not configured properly in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
+            fi
+            ;;
+        "backup_size")
+            if [[ "$(portal_status "$BACKUP_SIZE_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Size of last backup archive cannot be verified or is empty."
+                ITEM_RECOMMENDATION="We recommend verifying backup archive files to ensure complete backup copies."
+            fi
+            ;;
+        "os_eol")
+            if [[ "$(portal_status "$EOL_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Running End Of Life Operating system ($OS_NAME $OS_VERSION)."
+                ITEM_RECOMMENDATION="Running End Of Life Operating system is a major security risk as it would contain unpatched vulnerabilities and exploits that could be used to hack your server and steal critical business data & personally identifiable information of your customers. We recommend arranging a migration of websites and services to a new server as soon as possible as it is not feasible to upgrade the End Of Life Operating system."
+            fi
+            ;;
+        "software_stack")
+            if [[ "$(portal_status "$PHP_EOL_STATUS")" == "RED" ]]; then
+                local eol_php
+                eol_php=$(get_formatted_eol_php)
+                ITEM_ISSUE="End of Life PHP version(s) detected: $eol_php"
+                ITEM_RECOMMENDATION="$eol_php reached End of Life, and are no longer receiving any security patches from PHP. This means it will no longer have security support and could be exposed to unpatched security vulnerabilities. We recommend to update PHP version to 8.0 or higher."
+            fi
+            ;;
+        "tmp_security")
+            if [[ "$(portal_status "$TMP_SEC_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="/tmp directory is not mounted with noexec."
+                ITEM_RECOMMENDATION="/tmp is not secure, which can lead to malicious scripts executing in it. Please confirm if we can secure /tmp."
+            fi
+            ;;
+        "reboot_procedure")
+            if [[ "$(portal_status "$REBOOT_PROC_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Remote reboot portal access or reboot procedure details are not documented ($REBOOT_PROC_DETAIL)."
+                ITEM_RECOMMENDATION="We do not have the remote reboot portal access or details. Please submit your Datacenter logins and reboot procedure securely from Bobcares Client Area: https://portal.bobcares.com/website-add , so that we can contact the DC or initiate a reboot in case any issues are noted with the server."
+            fi
+            ;;
+        "ip_rdns")
+            if [[ "$(portal_status "$RDNS_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="IP RDNS is not configured properly in your server ($RDNS_DETAIL)."
+                ITEM_RECOMMENDATION="IP RDNS is not configured properly in your server."
+            fi
+            ;;
+        "malware_scan")
+            if [[ "$(portal_status "$MALWARE_RESULT_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Malware scripts found in the server ($MALWARE_RESULT_DETAIL):$(get_malware_findings_list)"
+                ITEM_RECOMMENDATION="Malware scripts found in the server. Please see the malware list in the report and let us know if we can go ahead and delete those."
+            fi
+            ;;
+        "rootkit_check")
+            if [[ "$(portal_status "$ROOTKIT_RESULT_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Rootkit scan flagged suspicious results ($ROOTKIT_RESULT_DETAIL)."
+                ITEM_RECOMMENDATION="Rootkit scan found suspicious items on the server. Please inspect rootkit scan logs and verify server integrity."
+            fi
+            ;;
+        "ssh_root")
+            if [[ "$(portal_status "$ROOT_LOGIN_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Direct SSH root login is enabled in the server (PermitRootLogin: $ROOT_LOGIN_RAW)."
+                ITEM_RECOMMENDATION="Root login is enabled in the server. It's always advisable to disable this feature to enhance server security."
+            fi
+            ;;
+        "php_functions")
+            if [[ "$(portal_status "$PHP_FUNC_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="PHP dangerous functions are found to be enabled in the server ($PHP_FUNC_DETAIL)."
+                ITEM_RECOMMENDATION="PHP dangerous functions are found to be enabled in the server. Dangerous PHP functions can cause security issues on the server. They must be disabled for preventing unauthorized execution of code on the server."
+            fi
+            ;;
+        "root_password")
+            if [[ "$(portal_status "$ROOT_PW_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Root password has not been updated within 90 days (approximately $DAYS_OLD days old)."
+                ITEM_RECOMMENDATION="We recommend updating root password every 90 days to enhance server security."
+            fi
+            ;;
+        "services")
+            if [[ "$(portal_status "$SERVICES_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="Essential system services are down ($SERVICES_DOWN)."
+                ITEM_RECOMMENDATION="System services are down. We recommend inspecting service logs and restarting failed services."
+            fi
+            ;;
+        "ssl_certificates")
+            if [[ "$(portal_status "$SSL_STATUS")" == "RED" ]]; then
+                ITEM_ISSUE="SSL certificate is expired ($SSL_EXPIRY)."
+                ITEM_RECOMMENDATION="SSL certificate has expired. We recommend renewing the SSL certificate to prevent browser warnings."
+            fi
+            ;;
+    esac
+}
+
+smart_summary_cell() {
+    local key="$1" default_detail="$2"
+    get_red_issue_and_rec "$key"
+    if [[ -n "$ITEM_ISSUE" && -n "$ITEM_RECOMMENDATION" ]]; then
+        local clean_issue clean_rec
+        clean_issue=$(echo "$ITEM_ISSUE" | tr '\n' ' ' | sed 's/  */ /g')
+        clean_rec=$(echo "$ITEM_RECOMMENDATION" | tr '\n' ' ' | sed 's/  */ /g')
+        echo "**Issue:** ${clean_issue}<br>**Recommendation:** ${clean_rec}"
+    else
+        echo "$default_detail"
+    fi
+}
+
 report_item() {
-    # $1: audit item, $2: raw status, $3: human-readable details
-    printf '  %-38s : %-6s - %s\n' "$1" "$(portal_status "$2")" "$3"
+    # $1: audit item, $2: raw status, $3: human-readable details, $4: optional key
+    local item_label="$1" raw_status="$2" details="$3" key="${4:-}"
+    local pstat
+    pstat=$(portal_status "$raw_status")
+    printf '  %-38s : %-6s - %s\n' "$item_label" "$pstat" "$details"
+
+    if [[ -n "$key" && "$pstat" == "RED" ]]; then
+        get_red_issue_and_rec "$key"
+        if [[ -n "$ITEM_ISSUE" && -n "$ITEM_RECOMMENDATION" ]]; then
+            echo "    Issue:"
+            echo "$ITEM_ISSUE" | sed 's/^/      /'
+            echo "    Recommendation:"
+            echo "$ITEM_RECOMMENDATION" | sed 's/^/      /'
+        fi
+    fi
 }
 
 colorize_report() {
-    # Keep report-detailed.log plain for the portal.  The audit has already
-    # redirected stdout through tee, so -t cannot be used to detect a terminal.
     if [[ "${NO_COLOR:-}" == "1" ]]; then
         cat
         return
@@ -1787,6 +2125,80 @@ colorize_report() {
         / : N\/A /   { sub(/N\/A/, grey "N/A" reset) }
         { print }
     '
+}
+
+generate_issues_and_recommendations_log() {
+    local items=(
+        "System Firewall|system_firewall|Threat Protection"
+        "Malware Scanner|malware_scanner|Threat Protection"
+        "Failed Login Detection|brute_force|Threat Protection"
+        "Web App Firewall|waf|Threat Protection"
+        "Rootkit Scanner|rootkit_scanner|Threat Protection"
+        "Operating System / Kernel Updates|os_kernel_update|Software Updates"
+        "PHP Updates|php_update|Software Updates"
+        "CMS Updates|cms_update|Software Updates"
+        "Web Server Updates|web_server_update|Software Updates"
+        "Database Server Updates|db_server_update|Software Updates"
+        "Other Software Updates|other_update|Software Updates"
+        "Kernel Updates|kernel_update|Software Updates"
+        "Reboot Required|reboot_required|Software Updates"
+        "HTTP Uptime|http_uptime|Server Health"
+        "CPU Usage|cpu_usage|Server Health"
+        "RAM Usage|ram_usage|Server Health"
+        "Disk Space Usage|disk_space|Server Health"
+        "Email Queue|email_queue|Server Health"
+        "IP Reputation|ip_reputation|Server Health"
+        "Local Backup|local_backup|Backup"
+        "Remote Backup|remote_backup|Backup"
+        "Daily Backup|daily_backup|Backup"
+        "Weekly Backup|weekly_backup|Backup"
+        "Monthly Backup|monthly_backup|Backup"
+        "Backup Retention|backup_retention|Backup"
+        "Recent Last Backup|backup_last|Backup"
+        "Size Of Last Backup|backup_size|Backup"
+        "Operating System EOL|os_eol|Software Life Time"
+        "Software Stack (PHP EOL)|software_stack|Software Life Time"
+        "/tmp Security|tmp_security|Proactive Defence"
+        "Reboot Procedure|reboot_procedure|Proactive Defence"
+        "IP RDNS|ip_rdns|Proactive Defence"
+        "Malware Scan Results|malware_scan|Proactive Defence"
+        "Rootkit Check Results|rootkit_check|Proactive Defence"
+        "SSH Root Access Security|ssh_root|Proactive Defence"
+        "PHP Functions Security|php_functions|Proactive Defence"
+        "Root Password Health|root_password|Proactive Defence"
+        "System Services|services|Additional Checks"
+        "SSL Certificates|ssl_certificates|Additional Checks"
+    )
+
+    {
+        echo "============================================================="
+        echo " BOBCARES AUDIT ISSUES & RECOMMENDATIONS (RED ITEMS)"
+        echo " Generated : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+        echo " Hostname  : $HOSTNAME"
+        echo " Main IP   : $MAIN_IP"
+        echo "============================================================="
+        echo
+
+        local count=0
+        local entry label key cat_name
+        for entry in "${items[@]}"; do
+            IFS='|' read -r label key cat_name <<< "$entry"
+            get_red_issue_and_rec "$key"
+            if [[ -n "$ITEM_ISSUE" && -n "$ITEM_RECOMMENDATION" ]]; then
+                ((count++))
+                echo "[$count] Sub Category: $label ($cat_name)"
+                echo "Issue:"
+                echo "$ITEM_ISSUE"
+                echo "Recommendation:"
+                echo "$ITEM_RECOMMENDATION"
+                echo "-------------------------------------------------------------"
+            fi
+        done
+
+        if (( count == 0 )); then
+            echo "No RED issues detected during this audit."
+        fi
+    } > "$RECOMMENDATIONS_FILE"
 }
 
 generate_smart_summary() {
@@ -1832,36 +2244,36 @@ Web Server Uptime : $HTTP_UPTIME
 
 | Audit Item | Status | Analysis / Recommendation |
 |---|---|---|
-| System Firewall | $(portal_status "$SYSTEM_FIREWALL_STATUS") | $SYSTEM_FIREWALL_ANALYSIS |
-| Malware Scanner | $(portal_status "$MALWARE_SCANNER_STATUS") | $MALWARE_SCANNER_DETAIL |
-| Failed Login Detection | $(portal_status "$BRUTE_STATUS") | $BRUTE_REASON |
-| Web App Firewall | $(portal_status "$MODSEC_STATUS") | $MODSEC_REASON |
-| Rootkit Scanner | $(portal_status "$ROOTKIT_SCANNER_STATUS") | $ROOTKIT_SCANNER_DETAIL |
+| System Firewall | $(portal_status "$SYSTEM_FIREWALL_STATUS") | $(smart_summary_cell "system_firewall" "$SYSTEM_FIREWALL_ANALYSIS") |
+| Malware Scanner | $(portal_status "$MALWARE_SCANNER_STATUS") | $(smart_summary_cell "malware_scanner" "$MALWARE_SCANNER_DETAIL") |
+| Failed Login Detection | $(portal_status "$BRUTE_STATUS") | $(smart_summary_cell "brute_force" "$BRUTE_REASON") |
+| Web App Firewall | $(portal_status "$MODSEC_STATUS") | $(smart_summary_cell "waf" "$MODSEC_REASON") |
+| Rootkit Scanner | $(portal_status "$ROOTKIT_SCANNER_STATUS") | $(smart_summary_cell "rootkit_scanner" "$ROOTKIT_SCANNER_DETAIL") |
 
 ## 2. Software Updates
 
 | Audit Item | Status | Analysis / Recommendation |
 |---|---|---|
-| Operating System / Kernel | $os_update_line | $SYSTEM_LATEST |
-| PHP | $([[ $PHP_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $PHP_UPDATE_COUNT pending \| Installed: $PHP_VERSIONS \| Default: $PHP_DEFAULT |
-| CMS | $(portal_status "$OUTDATED_CMS_STATUS") | $OUTDATED_CMS_DETAIL |
-| Web Server | $([[ $HTTPD_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $HTTPD_UPDATE_COUNT pending web server update(s) |
-| Database Server | $([[ $MYSQL_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $MYSQL_UPDATE_COUNT pending DB update(s) |
-| Other Softwares | $other_line | $OTHER_UPDATE_COUNT other pending package(s)${OTHER_UPDATE_PKGS:+: $OTHER_UPDATE_PKGS} |
-| Kernel | $(portal_status "$KERNEL_STATUS") | Running: $KERNEL_RUNNING \| Update: $KERNEL_UPDATE_AVAILABLE \| KernelCare: $KC_STATUS |
-| Reboot Required | $(portal_status "$REBOOT_STATUS") | $REBOOT_REASON |
+| Operating System / Kernel | $os_update_line | $(smart_summary_cell "os_kernel_update" "$SYSTEM_LATEST") |
+| PHP | $([[ $PHP_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $(smart_summary_cell "php_update" "$PHP_UPDATE_COUNT pending | Installed: $PHP_VERSIONS | Default: $PHP_DEFAULT") |
+| CMS | $(portal_status "$OUTDATED_CMS_STATUS") | $(smart_summary_cell "cms_update" "$OUTDATED_CMS_DETAIL") |
+| Web Server | $([[ $HTTPD_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $(smart_summary_cell "web_server_update" "$HTTPD_UPDATE_COUNT pending web server update(s)") |
+| Database Server | $([[ $MYSQL_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $(smart_summary_cell "db_server_update" "$MYSQL_UPDATE_COUNT pending DB update(s)") |
+| Other Softwares | $other_line | $(smart_summary_cell "other_update" "$OTHER_UPDATE_COUNT other pending package(s)${OTHER_UPDATE_PKGS:+: $OTHER_UPDATE_PKGS}") |
+| Kernel | $(portal_status "$KERNEL_STATUS") | $(smart_summary_cell "kernel_update" "Running: $KERNEL_RUNNING | Update: $KERNEL_UPDATE_AVAILABLE | KernelCare: $KC_STATUS") |
+| Reboot Required | $(portal_status "$REBOOT_STATUS") | $(smart_summary_cell "reboot_required" "$REBOOT_REASON") |
 
 ## 3. Server Health
 
 | Audit Item | Status | Details |
 |---|---|---|
 | Server Uptime | $(portal_status "$UPTIME_STATUS") | $UPTIME |
-| HTTP Uptime | $(portal_status "$HTTP_STATUS") | $HTTP_UPTIME |
-| CPU Usage | $(portal_status "$CPU_STATUS") | Load average: $LOAD |
-| RAM Usage | $(portal_status "$RAM_STATUS") | Used: ${RAM_PCT}% |
-| Disc Space Usage | $(portal_status "$DISK_STATUS") | Used: ${DISK_PCT}% |
-| Email Queue | $(portal_status "$EMAIL_STATUS") | Queued messages: $EMAIL_QUEUE |
-| IP Reputation | $(portal_status "$IP_REPUTATION_STATUS") | $IP_REPUTATION_DETAIL |
+| HTTP Uptime | $(portal_status "$HTTP_STATUS") | $(smart_summary_cell "http_uptime" "$HTTP_UPTIME") |
+| CPU Usage | $(portal_status "$CPU_STATUS") | $(smart_summary_cell "cpu_usage" "Load average: $LOAD") |
+| RAM Usage | $(portal_status "$RAM_STATUS") | $(smart_summary_cell "ram_usage" "Used: ${RAM_PCT}%") |
+| Disc Space Usage | $(portal_status "$DISK_STATUS") | $(smart_summary_cell "disk_space" "Used: ${DISK_PCT}%") |
+| Email Queue | $(portal_status "$EMAIL_STATUS") | $(smart_summary_cell "email_queue" "Queued messages: $EMAIL_QUEUE") |
+| IP Reputation | $(portal_status "$IP_REPUTATION_STATUS") | $(smart_summary_cell "ip_reputation" "$IP_REPUTATION_DETAIL") |
 
 **Overall Server Health:** $OVERALL_HEALTH
 
@@ -1869,36 +2281,36 @@ Web Server Uptime : $HTTP_UPTIME
 
 | Audit Item | Status | Details |
 |---|---|---|
-| Local Backup | $(portal_status "$BACKUP_STATUS") | $BACKUP_DETAIL |
-| Remote Backup | $(portal_status "$BACKUP_REMOTE_STATUS") | $BACKUP_REMOTE_DETAIL |
-| Daily Backup | $(portal_status "$BACKUP_DAILY_STATUS") | $BACKUP_DAILY_DETAIL |
-| Weekly Backup | $(portal_status "$BACKUP_WEEKLY_STATUS") | $BACKUP_WEEKLY_DETAIL |
-| Monthly Backup | $(portal_status "$BACKUP_MONTHLY_STATUS") | $BACKUP_MONTHLY_DETAIL |
-| Backup Retention | $(portal_status "$BACKUP_RETENTION_STATUS") | $BACKUP_RETENTION_DETAIL |
-| Recent Last Backup | $(portal_status "$BACKUP_LAST_STATUS") | $BACKUP_LAST_DETAIL |
-| Size Of Last Backup | $(portal_status "$BACKUP_SIZE_STATUS") | $BACKUP_SIZE_DETAIL |
+| Local Backup | $(portal_status "$BACKUP_STATUS") | $(smart_summary_cell "local_backup" "$BACKUP_DETAIL") |
+| Remote Backup | $(portal_status "$BACKUP_REMOTE_STATUS") | $(smart_summary_cell "remote_backup" "$BACKUP_REMOTE_DETAIL") |
+| Daily Backup | $(portal_status "$BACKUP_DAILY_STATUS") | $(smart_summary_cell "daily_backup" "$BACKUP_DAILY_DETAIL") |
+| Weekly Backup | $(portal_status "$BACKUP_WEEKLY_STATUS") | $(smart_summary_cell "weekly_backup" "$BACKUP_WEEKLY_DETAIL") |
+| Monthly Backup | $(portal_status "$BACKUP_MONTHLY_STATUS") | $(smart_summary_cell "monthly_backup" "$BACKUP_MONTHLY_DETAIL") |
+| Backup Retention | $(portal_status "$BACKUP_RETENTION_STATUS") | $(smart_summary_cell "backup_retention" "$BACKUP_RETENTION_DETAIL") |
+| Recent Last Backup | $(portal_status "$BACKUP_LAST_STATUS") | $(smart_summary_cell "backup_last" "$BACKUP_LAST_DETAIL") |
+| Size Of Last Backup | $(portal_status "$BACKUP_SIZE_STATUS") | $(smart_summary_cell "backup_size" "$BACKUP_SIZE_DETAIL") |
 
 ## 5. Software Life Time
 
 | Audit Item | Status | Details |
 |---|---|---|
 | Control Panel | $cp_lt_status | $cp_lt_detail |
-| Operating System | $os_lifetime_line | $OS_NAME $OS_VERSION - $EOL_STATUS by vendor |
-| CMS | $(portal_status "$OUTDATED_CMS_STATUS") | $OUTDATED_CMS_DETAIL |
-| Software Stack | $stack_status | $stack_detail |
+| Operating System | $os_lifetime_line | $(smart_summary_cell "os_eol" "$OS_NAME $OS_VERSION - $EOL_STATUS by vendor") |
+| CMS | $(portal_status "$OUTDATED_CMS_STATUS") | $(smart_summary_cell "cms_update" "$OUTDATED_CMS_DETAIL") |
+| Software Stack | $stack_status | $(smart_summary_cell "software_stack" "$stack_detail") |
 
 ## 6. Proactive Defence
 
 | Audit Item | Status | Details |
 |---|---|---|
-| /tmp Security | $(portal_status "$TMP_SEC_STATUS") | $TMP_SEC_DETAIL |
-| Reboot Procedure | $(portal_status "$REBOOT_PROC_STATUS") | $REBOOT_PROC_DETAIL |
-| IP RDNS | $(portal_status "$RDNS_STATUS") | $RDNS_DETAIL |
-| Malware Scan | $(portal_status "$MALWARE_RESULT_STATUS") | $MALWARE_RESULT_DETAIL |
-| Rootkit Check | $(portal_status "$ROOTKIT_RESULT_STATUS") | $ROOTKIT_RESULT_DETAIL |
-| SSH Root Access Security | $(portal_status "$ROOT_LOGIN_STATUS") | PermitRootLogin: $ROOT_LOGIN_RAW \| PasswordAuth: $SSH_PASSWORD_AUTH \| Port(s): $SSH_PORT |
-| PHP Functions Security | $(portal_status "$PHP_FUNC_STATUS") | $PHP_FUNC_DETAIL |
-| Root password health | $(portal_status "$ROOT_PW_STATUS") | Root password ~$DAYS_OLD days old (target: rotated within 90 days) |
+| /tmp Security | $(portal_status "$TMP_SEC_STATUS") | $(smart_summary_cell "tmp_security" "$TMP_SEC_DETAIL") |
+| Reboot Procedure | $(portal_status "$REBOOT_PROC_STATUS") | $(smart_summary_cell "reboot_procedure" "$REBOOT_PROC_DETAIL") |
+| IP RDNS | $(portal_status "$RDNS_STATUS") | $(smart_summary_cell "ip_rdns" "$RDNS_DETAIL") |
+| Malware Scan | $(portal_status "$MALWARE_RESULT_STATUS") | $(smart_summary_cell "malware_scan" "$MALWARE_RESULT_DETAIL") |
+| Rootkit Check | $(portal_status "$ROOTKIT_RESULT_STATUS") | $(smart_summary_cell "rootkit_check" "$ROOTKIT_RESULT_DETAIL") |
+| SSH Root Access Security | $(portal_status "$ROOT_LOGIN_STATUS") | $(smart_summary_cell "ssh_root" "PermitRootLogin: $ROOT_LOGIN_RAW | PasswordAuth: $SSH_PASSWORD_AUTH | Port(s): $SSH_PORT") |
+| PHP Functions Security | $(portal_status "$PHP_FUNC_STATUS") | $(smart_summary_cell "php_functions" "$PHP_FUNC_DETAIL") |
+| Root password health | $(portal_status "$ROOT_PW_STATUS") | $(smart_summary_cell "root_password" "Root password ~$DAYS_OLD days old (target: rotated within 90 days)") |
 
 ---
 
@@ -1906,12 +2318,12 @@ Web Server Uptime : $HTTP_UPTIME
 
 | Check | Status | Details |
 |---|---|---|
-| Services | $(portal_status "$SERVICES_STATUS") | $SERVICES_DOWN |
-| SSL Certificates | $(portal_status "$SSL_STATUS") | $SSL_EXPIRY |
+| Services | $(portal_status "$SERVICES_STATUS") | $(smart_summary_cell "services" "$SERVICES_DOWN") |
+| SSL Certificates | $(portal_status "$SSL_STATUS") | $(smart_summary_cell "ssl_certificates" "$SSL_EXPIRY") |
 | User Accounts | N/A | Total: $ACCT_COUNT | Locked: $ACCT_SUSPENDED |
 | Malware Scan Setup | N/A | $SECURITY_ACTIONS Scan: $MALWARE_SCAN_STARTED |
 
-**Recommendation:** Review all RED and CHECK items above. Prioritise pending security updates, reboot if required, enable or verify backups, and investigate IP reputation if listed. N/A items need a manual check where applicable.
+**Recommendation:** Review all RED items above. Prioritise pending security updates, reboot if required, enable or verify backups, and investigate IP reputation if listed. N/A items need a manual check where applicable.
 EOF
 }
 
@@ -1930,66 +2342,65 @@ generate_detailed_log() {
         echo "============================================================="
         echo " THREAT PROTECTION"
         echo "============================================================="
-        report_item "System Firewall" "$SYSTEM_FIREWALL_STATUS" "$SYSTEM_FIREWALL_ANALYSIS"
-        report_item "Malware Scanner" "$MALWARE_SCANNER_STATUS" "$MALWARE_SCANNER_DETAIL"
-        report_item "Failed Login Detection" "$BRUTE_STATUS" "$BRUTE_REASON"
-        report_item "Web Application Firewall" "$MODSEC_STATUS" "$MODSEC_REASON"
-        report_item "Rootkit Scanner" "$ROOTKIT_SCANNER_STATUS" "$ROOTKIT_SCANNER_DETAIL"
+        report_item "System Firewall" "$SYSTEM_FIREWALL_STATUS" "$SYSTEM_FIREWALL_ANALYSIS" "system_firewall"
+        report_item "Malware Scanner" "$MALWARE_SCANNER_STATUS" "$MALWARE_SCANNER_DETAIL" "malware_scanner"
+        report_item "Failed Login Detection" "$BRUTE_STATUS" "$BRUTE_REASON" "brute_force"
+        report_item "Web Application Firewall" "$MODSEC_STATUS" "$MODSEC_REASON" "waf"
+        report_item "Rootkit Scanner" "$ROOTKIT_SCANNER_STATUS" "$ROOTKIT_SCANNER_DETAIL" "rootkit_scanner"
         echo
         echo "============================================================="
         echo " SOFTWARE UPDATES"
         echo "============================================================="
         report_item "Control Panel" "N/A" "No control panel installed on this server"
-        report_item "Operating System / Kernel" "$SYSTEM_UPDATE_STATUS" "$SYSTEM_LATEST"
-        report_item "PHP" "$( [[ $PHP_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$PHP_UPDATE_COUNT pending update(s); installed: $PHP_VERSIONS; default: $PHP_DEFAULT"
-        report_item "CMS" "$OUTDATED_CMS_STATUS" "$OUTDATED_CMS_DETAIL"
-        report_item "Web Server" "$( [[ $HTTPD_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$HTTPD_UPDATE_COUNT pending web-server update(s)"
-        report_item "Database Server" "$( [[ $MYSQL_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$MYSQL_UPDATE_COUNT pending database update(s)"
-        report_item "Other Softwares" "$( [[ $OTHER_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$OTHER_UPDATE_COUNT other pending package(s)${OTHER_UPDATE_PKGS:+: $OTHER_UPDATE_PKGS}"
+        report_item "Operating System / Kernel" "$SYSTEM_UPDATE_STATUS" "$SYSTEM_LATEST" "os_kernel_update"
+        report_item "PHP" "$( [[ $PHP_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$PHP_UPDATE_COUNT pending update(s); installed: $PHP_VERSIONS; default: $PHP_DEFAULT" "php_update"
+        report_item "CMS" "$OUTDATED_CMS_STATUS" "$OUTDATED_CMS_DETAIL" "cms_update"
+        report_item "Web Server" "$( [[ $HTTPD_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$HTTPD_UPDATE_COUNT pending web-server update(s)" "web_server_update"
+        report_item "Database Server" "$( [[ $MYSQL_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$MYSQL_UPDATE_COUNT pending database update(s)" "db_server_update"
+        report_item "Other Softwares" "$( [[ $OTHER_UPDATE_COUNT -gt 0 ]] && echo 'Update Available' || echo 'Good' )" "$OTHER_UPDATE_COUNT other pending package(s)${OTHER_UPDATE_PKGS:+: $OTHER_UPDATE_PKGS}" "other_update"
         echo
         echo "============================================================="
         echo " SERVER HEALTH"
         echo "============================================================="
         report_item "Server Uptime" "$UPTIME_STATUS" "$UPTIME"
-        report_item "HTTP Uptime" "$HTTP_STATUS" "$HTTP_UPTIME"
-        report_item "CPU Usage" "$CPU_STATUS" "Load average: $LOAD"
-        report_item "RAM Usage" "$RAM_STATUS" "${RAM_PCT}% used"
-        report_item "Disk Space Usage" "$DISK_STATUS" "${DISK_PCT}% used"
-        report_item "Email Queue" "$EMAIL_STATUS" "Queued messages: $EMAIL_QUEUE"
-        report_item "IP Reputation" "$IP_REPUTATION_STATUS" "$IP_REPUTATION_DETAIL"
+        report_item "HTTP Uptime" "$HTTP_STATUS" "$HTTP_UPTIME" "http_uptime"
+        report_item "CPU Usage" "$CPU_STATUS" "Load average: $LOAD" "cpu_usage"
+        report_item "RAM Usage" "$RAM_STATUS" "${RAM_PCT}% used" "ram_usage"
+        report_item "Disk Space Usage" "$DISK_STATUS" "${DISK_PCT}% used" "disk_space"
+        report_item "Email Queue" "$EMAIL_STATUS" "Queued messages: $EMAIL_QUEUE" "email_queue"
+        report_item "IP Reputation" "$IP_REPUTATION_STATUS" "$IP_REPUTATION_DETAIL" "ip_reputation"
         echo
         echo "============================================================="
         echo " BACKUP"
         echo "============================================================="
-        report_item "Local Backup" "$BACKUP_STATUS" "$BACKUP_DETAIL"
-        report_item "Remote Backup" "$BACKUP_REMOTE_STATUS" "$BACKUP_REMOTE_DETAIL"
-        report_item "Daily Backup" "$BACKUP_DAILY_STATUS" "$BACKUP_DAILY_DETAIL"
-        report_item "Weekly Backup" "$BACKUP_WEEKLY_STATUS" "$BACKUP_WEEKLY_DETAIL"
-        report_item "Monthly Backup" "$BACKUP_MONTHLY_STATUS" "$BACKUP_MONTHLY_DETAIL"
-        report_item "Backup Retention" "$BACKUP_RETENTION_STATUS" "$BACKUP_RETENTION_DETAIL"
-        report_item "Recent Last Backup" "$BACKUP_LAST_STATUS" "$BACKUP_LAST_DETAIL"
-        report_item "Size Of Last Backup" "$BACKUP_SIZE_STATUS" "$BACKUP_SIZE_DETAIL"
+        report_item "Local Backup" "$BACKUP_STATUS" "$BACKUP_DETAIL" "local_backup"
+        report_item "Remote Backup" "$BACKUP_REMOTE_STATUS" "$BACKUP_REMOTE_DETAIL" "remote_backup"
+        report_item "Daily Backup" "$BACKUP_DAILY_STATUS" "$BACKUP_DAILY_DETAIL" "daily_backup"
+        report_item "Weekly Backup" "$BACKUP_WEEKLY_STATUS" "$BACKUP_WEEKLY_DETAIL" "weekly_backup"
+        report_item "Monthly Backup" "$BACKUP_MONTHLY_STATUS" "$BACKUP_MONTHLY_DETAIL" "monthly_backup"
+        report_item "Backup Retention" "$BACKUP_RETENTION_STATUS" "$BACKUP_RETENTION_DETAIL" "backup_retention"
+        report_item "Recent Last Backup" "$BACKUP_LAST_STATUS" "$BACKUP_LAST_DETAIL" "backup_last"
+        report_item "Size Of Last Backup" "$BACKUP_SIZE_STATUS" "$BACKUP_SIZE_DETAIL" "backup_size"
         echo
         echo "============================================================="
         echo " SOFTWARE LIFE TIME"
         echo "============================================================="
         report_item "Control Panel" "N/A" "No control panel installed on this server"
-        report_item "Operating System" "$EOL_STATUS" "$DISTRO_NAME"
-        report_item "Software Stack" "$PHP_EOL_STATUS" "$PHP_EOL_DETAIL"
-        report_item "CMS Lifetime" "$OUTDATED_CMS_STATUS" "$OUTDATED_CMS_DETAIL"
-        #report_item "Kernel Status" "$KERNEL_STATUS" "Kernel: $KERNEL_RUNNING; KernelCare: $KC_STATUS"
+        report_item "Operating System" "$EOL_STATUS" "$DISTRO_NAME" "os_eol"
+        report_item "Software Stack" "$PHP_EOL_STATUS" "$PHP_EOL_DETAIL" "software_stack"
+        report_item "CMS Lifetime" "$OUTDATED_CMS_STATUS" "$OUTDATED_CMS_DETAIL" "cms_update"
         echo
         echo "============================================================="
         echo " PROACTIVE DEFENCE"
         echo "============================================================="
-        report_item "/tmp Security" "$TMP_SEC_STATUS" "$TMP_SEC_DETAIL"
-        report_item "Reboot Procedure" "$REBOOT_PROC_STATUS" "$REBOOT_PROC_DETAIL"
-        report_item "IP RDNS" "$RDNS_STATUS" "$RDNS_DETAIL"
-        report_item "Malware Scan" "$MALWARE_RESULT_STATUS" "$MALWARE_RESULT_DETAIL"
-        report_item "Rootkit Check" "$ROOTKIT_RESULT_STATUS" "$ROOTKIT_RESULT_DETAIL"
-        report_item "SSH Root Access Security" "$ROOT_LOGIN_STATUS" "PermitRootLogin: $ROOT_LOGIN_RAW; PasswordAuth: $SSH_PASSWORD_AUTH; port(s): $SSH_PORT"
-        report_item "PHP Functions Security" "$PHP_FUNC_STATUS" "$PHP_FUNC_DETAIL"
-        report_item "Root Password Health" "$ROOT_PW_STATUS" "Changed approximately $DAYS_OLD day(s) ago"
+        report_item "/tmp Security" "$TMP_SEC_STATUS" "$TMP_SEC_DETAIL" "tmp_security"
+        report_item "Reboot Procedure" "$REBOOT_PROC_STATUS" "$REBOOT_PROC_DETAIL" "reboot_procedure"
+        report_item "IP RDNS" "$RDNS_STATUS" "$RDNS_DETAIL" "ip_rdns"
+        report_item "Malware Scan" "$MALWARE_RESULT_STATUS" "$MALWARE_RESULT_DETAIL" "malware_scan"
+        report_item "Rootkit Check" "$ROOTKIT_RESULT_STATUS" "$ROOTKIT_RESULT_DETAIL" "rootkit_check"
+        report_item "SSH Root Access Security" "$ROOT_LOGIN_STATUS" "PermitRootLogin: $ROOT_LOGIN_RAW; PasswordAuth: $SSH_PASSWORD_AUTH; port(s): $SSH_PORT" "ssh_root"
+        report_item "PHP Functions Security" "$PHP_FUNC_STATUS" "$PHP_FUNC_DETAIL" "php_functions"
+        report_item "Root Password Health" "$ROOT_PW_STATUS" "Changed approximately $DAYS_OLD day(s) ago" "root_password"
     } > "$DETAILED_FILE"
 
     colorize_report < "$DETAILED_FILE"
@@ -2098,15 +2509,24 @@ main() {
     export MALWARE_SCAN_STARTED
 
     generate_findings_log
+    generate_issues_and_recommendations_log
     generate_smart_summary
     generate_detailed_log
 
     echo
     echo "Audit Complete!"
-    echo "Findings Log  : $FINDINGS_FILE"
-    echo "Smart Summary : $SUMMARY_FILE"
-    echo "Detailed Log  : $DETAILED_FILE"
-    echo "Debug Log     : $DEBUG_LOG"
+    echo "Findings Log         : $FINDINGS_FILE"
+    echo "Recommendations Log  : $RECOMMENDATIONS_FILE"
+    echo "Smart Summary        : $SUMMARY_FILE"
+    echo "Detailed Log         : $DETAILED_FILE"
+    echo "Debug Log            : $DEBUG_LOG"
+
+    if [[ -s "$RECOMMENDATIONS_FILE" ]] && grep -q "Sub Category:" "$RECOMMENDATIONS_FILE"; then
+        echo
+        echo "=================== ISSUES & RECOMMENDATIONS ==================="
+        cat "$RECOMMENDATIONS_FILE"
+        echo "================================================================"
+    fi
 
     echo
     echo "===================== AUDIT SUMMARY ====================="
@@ -2131,3 +2551,4 @@ main() {
 }
 
 main "$@"
+
