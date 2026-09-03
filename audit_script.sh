@@ -10,6 +10,18 @@
 #     PHP EOL versions, malware scan results, rootkit scan results,
 #     rDNS status, reboot procedure info
 #===============================================================================
+# Require root privileges
+if [[ $EUID -ne 0 ]]; then
+    echo "[ERROR] This audit script must be run as root."
+    echo
+    echo "Please run the script again using one of the following:"
+    echo
+    echo "  curl -L https://tinyurl.com/genericaudit | sudo bash"
+    echo "  curl -fsSL https://tinyurl.com/genericaudit | sudo bash"
+    echo
+    exit 1
+fi
+
 SCRIPT_DIR="/root/scripts"
 
 mkdir -p "$SCRIPT_DIR"
@@ -34,18 +46,6 @@ exec > >(stdbuf -o0 tr -cd '\11\12\15\33\40-\176' | tee -a "$DEBUG_LOG") 2>&1
 echo "=== Starting Bobcares Smart Audit at $(date) ==="
 echo "Debug log: $DEBUG_LOG | State dir: $STATE_DIR"
 echo
-
-# Require root privileges
-if [[ $EUID -ne 0 ]]; then
-    echo "[ERROR] This audit script must be run as root."
-    echo
-    echo "Please run the script again using one of the following:"
-    echo
-    echo "  sudo ./audit.sh"
-    echo "  sudo bash audit.sh"
-    echo
-    exit 1
-fi
 
 # Ensure this script is executed ONLY on Non-Control-Panel (No Panel) servers
 check_no_panel_only() {
