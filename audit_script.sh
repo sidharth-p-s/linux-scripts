@@ -16,8 +16,8 @@ if [[ $EUID -ne 0 ]]; then
     echo
     echo "Please run the script again using one of the following:"
     echo
-    echo "  curl -L https://tinyurl.com/genericaudit | sudo bash"
-    echo "  curl -fsSL https://tinyurl.com/genericaudit | sudo bash"
+    echo "  curl -L https://tinyurl.com/genericaudit | bash"
+    echo "  curl -fsSL https://tinyurl.com/genericaudit | bash"
     echo
     exit 1
 fi
@@ -46,6 +46,15 @@ exec > >(stdbuf -o0 tr -cd '\11\12\15\33\40-\176' | tee -a "$DEBUG_LOG") 2>&1
 echo "=== Starting Bobcares Smart Audit at $(date) ==="
 echo "Debug log: $DEBUG_LOG | State dir: $STATE_DIR"
 echo
+
+RUN_ANYWAY=false
+for arg in "$@"; do
+    case "$arg" in
+        --runanyway|--run-anyway|-f|--force)
+            RUN_ANYWAY=true
+            ;;
+    esac
+done
 
 # Ensure this script is executed ONLY on Non-Control-Panel (No Panel) servers
 check_no_panel_only() {
@@ -76,9 +85,17 @@ check_no_panel_only() {
     fi
 
     if [[ -n "$detected_panel" ]]; then
-        echo "[ERROR] This script is for no panel server. This server has the panel '$detected_panel'. Exiting the script."
-        echo
-        exit 1
+        if [[ "$RUN_ANYWAY" == "true" ]]; then
+            echo "[WARNING] Detected control panel '$detected_panel', but --runanyway flag was supplied. Proceeding with audit..."
+            echo
+        else
+            echo "[ERROR] This script is for no panel server. This server has the panel '$detected_panel'."
+            echo "If you wish to run the audit anyway, execute the script with the --runanyway flag:"
+            echo
+            echo "  curl -L https://tinyurl.com/genericaudit | bash -s -- --runanyway"
+            echo
+            exit 1
+        fi
     fi
 }
 check_no_panel_only
