@@ -69,6 +69,8 @@ check_no_panel_only() {
         detected_panel="InterWorx"
     elif [ -d /usr/local/ispconfig ]; then
         detected_panel="ISPConfig"
+    elif [ -d /usr/local/webuzo ] || [ -f /usr/local/webuzo/version ]; then
+        detected_panel="Webuzo"
     elif [ -d /etc/webmin ] || [ -d /usr/libexec/webmin ]; then
         detected_panel="Webmin / Virtualmin"
     fi
