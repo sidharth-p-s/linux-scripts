@@ -48,9 +48,12 @@ echo "Debug log: $DEBUG_LOG | State dir: $STATE_DIR"
 echo
 
 RUN_ANYWAY=false
+if [[ "${RUNANYWAY:-0}" == "1" || "${RUN_ANYWAY:-0}" == "1" || "${RUNANYWAY}" == "true" || "${FORCE:-0}" == "1" ]]; then
+    RUN_ANYWAY=true
+fi
 for arg in "$@"; do
     case "$arg" in
-        --runanyway|--run-anyway|-f|--force)
+        --runanyway|--run-anyway|-f|--force|runanyway|force)
             RUN_ANYWAY=true
             ;;
     esac
@@ -86,13 +89,14 @@ check_no_panel_only() {
 
     if [[ -n "$detected_panel" ]]; then
         if [[ "$RUN_ANYWAY" == "true" ]]; then
-            echo "[WARNING] Detected control panel '$detected_panel', but --runanyway flag was supplied. Proceeding with audit..."
+            echo "[WARNING] Detected control panel '$detected_panel', but runanyway option was supplied. Proceeding with audit..."
             echo
         else
             echo "[ERROR] This script is for no panel server. This server has the panel '$detected_panel'."
-            echo "If you wish to run the audit anyway, execute the script with the --runanyway flag:"
+            echo "If you wish to run the audit anyway, execute the script using one of the following:"
             echo
-            echo "  curl -L https://tinyurl.com/genericaudit | bash -s -- --runanyway"
+            echo "  RUNANYWAY=1 curl -L https://tinyurl.com/genericaudit | bash"
+            echo "  curl -L https://tinyurl.com/genericaudit | bash -s runanyway"
             echo
             exit 1
         fi
