@@ -3007,6 +3007,7 @@ run_audit_tui() {
     local BG_GREEN=$'\033[42;1;30m'
     local BG_YELLOW=$'\033[43;1;30m'
     local BG_GREY=$'\033[100;1;37m'
+    local BG_SCROLL_HINT=$'\033[48;5;214;1;30m'  # bright amber bg, bold black text
 
     tui_badge() {
         case "$1" in
@@ -3461,9 +3462,25 @@ run_audit_tui() {
             # Reserve last row for overflow hint if needed
             local rows_left=$(( bot_end - cur_screen_row + 1 ))
             local items_left=$(( total_blines - bi ))
-            if (( cur_screen_row == bot_end && items_left > 1 )); then
+
+            # Top scroll-up hint (when not at beginning)
+            if (( bi == bot_scroll && bot_scroll > 0 && cur_screen_row == bot_start )); then
+                local up_msg=" ▲  PgUp  │  ${bot_scroll} entries above — scroll up to view  ▲ "
+                local up_pad=$(( term_cols - ${#up_msg} ))
+                (( up_pad < 0 )) && up_pad=0
                 buf+=$'\033['"${cur_screen_row};1H"$'\033[2K'
-                buf+="  ${C_CYAN}↓ ${items_left} more entries below  [PgDn to scroll, ENTER for full view]${C_RESET}"
+                buf+="${BG_SCROLL_HINT}${up_msg}$(printf '%*s' $up_pad '')${C_RESET}"
+                (( cur_screen_row++ ))
+                (( cur_screen_row > bot_end )) && break
+            fi
+
+            # Bottom overflow hint — fills last row with bright banner
+            if (( cur_screen_row == bot_end && items_left > 1 )); then
+                local dn_msg=" ▼  PgDn  │  ${items_left} more findings below — press PgDn to scroll  ▼ "
+                local dn_pad=$(( term_cols - ${#dn_msg} ))
+                (( dn_pad < 0 )) && dn_pad=0
+                buf+=$'\033['"${cur_screen_row};1H"$'\033[2K'
+                buf+="${BG_SCROLL_HINT}${dn_msg}$(printf '%*s' $dn_pad '')${C_RESET}"
                 break
             fi
 
@@ -3479,8 +3496,11 @@ run_audit_tui() {
                 # Reserve last row for overflow hint if more entries follow
                 (( bi + 1 < total_blines )) && (( rows_avail-- ))
                 if (( rows_avail <= 0 )); then
+                    local dn_msg2=" ▼  PgDn  │  $(( total_blines - bi )) more findings below — press PgDn to scroll  ▼ "
+                    local dn_pad2=$(( term_cols - ${#dn_msg2} ))
+                    (( dn_pad2 < 0 )) && dn_pad2=0
                     buf+=$'\033['"${cur_screen_row};1H"$'\033[2K'
-                    buf+="  ${C_CYAN}↓ $(( total_blines - bi )) more entries below  [PgDn to scroll, ENTER for full view]${C_RESET}"
+                    buf+="${BG_SCROLL_HINT}${dn_msg2}$(printf '%*s' $dn_pad2 '')${C_RESET}"
                     break
                 fi
                 if (( rows_used > rows_avail )); then
