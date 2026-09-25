@@ -4238,17 +4238,9 @@ main() {
     echo "          and perform a full malware scan."
     echo
     if [[ "$NO_TUI" != "true" ]]; then
-        if [[ "$LAUNCH_TUI" == "true" ]]; then
+        if [ -t 0 ] || [ -c /dev/tty ]; then
+            sleep 1
             run_audit_tui
-        elif [ -t 0 ] || [ -c /dev/tty ]; then
-            echo
-            printf "\033[1;36m[TUI]\033[0m Launch GoAccess-style interactive dashboard? [Y/n] (Auto-launch in 5s): "
-            local ans=""
-            read -t 5 -r -n 1 ans < /dev/tty 2>/dev/null || ans="y"
-            echo
-            if [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]]; then
-                run_audit_tui
-            fi
         fi
     fi
 }
