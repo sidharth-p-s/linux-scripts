@@ -10,8 +10,14 @@
 #     PHP EOL versions, malware scan results, rootkit scan results,
 #     rDNS status, reboot procedure info
 #===============================================================================
-# Require root privileges
-if [[ $EUID -ne 0 ]]; then
+# Require root privileges (allow --view without root if reviewing existing reports)
+is_view_mode=false
+for arg in "$@"; do
+    case "$arg" in
+        --view|-v|view|--tui-only) is_view_mode=true ;;
+    esac
+done
+if [[ $EUID -ne 0 && "$is_view_mode" != "true" ]]; then
     echo "[ERROR] This audit script must be run as root."
     echo
     echo "Please run the script again using one of the following:"
@@ -23,9 +29,6 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 SCRIPT_DIR="/root/scripts"
-
-mkdir -p "$SCRIPT_DIR"
-
 SUMMARY_FILE="$SCRIPT_DIR/audit-smart-summary.md"
 DETAILED_FILE="$SCRIPT_DIR/report-detailed.log"
 FINDINGS_FILE="$SCRIPT_DIR/audit-findings.log"
@@ -35,26 +38,46 @@ DEBUG_LOG="$SCRIPT_DIR/audit-debug.log"
 STATE_DIR=$(mktemp -d /tmp/bc-audit.XXXXXX)
 trap 'rm -rf "$STATE_DIR"' EXIT
 
-if [ -f "$DEBUG_LOG" ]; then
-    mv -f "$DEBUG_LOG" "${DEBUG_LOG}.prev" 2>/dev/null || rm -f "$DEBUG_LOG"
+if [[ "$is_view_mode" != "true" ]]; then
+    mkdir -p "$SCRIPT_DIR" 2>/dev/null || true
+    if [ -f "$DEBUG_LOG" ]; then
+        mv -f "$DEBUG_LOG" "${DEBUG_LOG}.prev" 2>/dev/null || rm -f "$DEBUG_LOG"
+    fi
+    exec > >(stdbuf -o0 tr -cd '\11\12\15\33\40-\176' | tee -a "$DEBUG_LOG") 2>&1
+    echo "=== Starting Bobcares Smart Audit at $(date) ==="
+    echo "Debug log: $DEBUG_LOG | State dir: $STATE_DIR"
+    echo
+else
+    mkdir -p "$SCRIPT_DIR" 2>/dev/null || true
+    if [[ ! -w "$SCRIPT_DIR" ]]; then
+        DEBUG_LOG="/tmp/audit-debug.log"
+    fi
 fi
-
-# Keep the ESC byte (octal 033).  tput emits terminal escape sequences for
-# colours; filtering out ESC leaves broken literal text such as "[32m".
-exec > >(stdbuf -o0 tr -cd '\11\12\15\33\40-\176' | tee -a "$DEBUG_LOG") 2>&1
-
-echo "=== Starting Bobcares Smart Audit at $(date) ==="
-echo "Debug log: $DEBUG_LOG | State dir: $STATE_DIR"
-echo
 
 RUN_ANYWAY=false
 if [[ "${RUNANYWAY:-0}" == "1" || "${RUN_ANYWAY:-0}" == "1" || "${RUNANYWAY}" == "true" || "${FORCE:-0}" == "1" ]]; then
     RUN_ANYWAY=true
 fi
+LAUNCH_TUI=false
+NO_TUI=false
+VIEW_ONLY=false
+if [[ "${TUI:-0}" == "1" || "${TUI}" == "true" ]]; then
+    LAUNCH_TUI=true
+fi
 for arg in "$@"; do
     case "$arg" in
         --runanyway|--run-anyway|-f|--force|runanyway|force)
             RUN_ANYWAY=true
+            ;;
+        --tui|-t|tui)
+            LAUNCH_TUI=true
+            ;;
+        --no-tui|no-tui)
+            NO_TUI=true
+            ;;
+        --view|-v|view|--tui-only)
+            VIEW_ONLY=true
+            LAUNCH_TUI=true
             ;;
     esac
 done
@@ -1889,238 +1912,166 @@ get_red_issue_and_rec() {
 
     case "$key" in
         "system_firewall")
-            if [[ "$(portal_status "$SYSTEM_FIREWALL_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Firewall and CSF are not installed or active on the server (${SYSTEM_FIREWALL_ANALYSIS:-No active firewall detected})."
-                ITEM_RECOMMENDATION="Firewall and CSF are not installed or active on the server. Kindly let us know if we can enable it."
-            fi
+            ITEM_ISSUE="Firewall and CSF are not installed or active on the server (${SYSTEM_FIREWALL_ANALYSIS:-No active firewall detected})."
+            ITEM_RECOMMENDATION="Firewall and CSF are not installed or active on the server. Kindly let us know if we can enable it."
             ;;
         "malware_scanner")
-            if [[ "$(portal_status "$MALWARE_SCANNER_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Automated malware scanner is missing or inactive on the server ($MALWARE_SCANNER_DETAIL)."
-                ITEM_RECOMMENDATION="Automated malware scanner is missing or inactive on the server. We recommend installing ClamAV and setting up regular malware scanning."
-            fi
+            ITEM_ISSUE="Automated malware scanner is missing or inactive on the server ($MALWARE_SCANNER_DETAIL)."
+            ITEM_RECOMMENDATION="Automated malware scanner is missing or inactive on the server. We recommend installing ClamAV and setting up regular malware scanning."
             ;;
         "brute_force")
-            if [[ "$(portal_status "$BRUTE_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Failed login detection is not active on the server ($BRUTE_REASON)."
-                ITEM_RECOMMENDATION="Failed login detection is not enabled on the server. We recommend enabling Fail2Ban to protect the server against brute-force login attempts."
-            fi
+            ITEM_ISSUE="Failed login detection is not active on the server ($BRUTE_REASON)."
+            ITEM_RECOMMENDATION="Failed login detection is not enabled on the server. We recommend enabling Fail2Ban to protect the server against brute-force login attempts."
             ;;
         "waf")
-            if [[ "$(portal_status "$MODSEC_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Web Application Firewall (ModSecurity) is disabled on your server ($MODSEC_REASON)."
-                ITEM_RECOMMENDATION="Mod_Security is disabled. It is reccomended to enable mod_security to protect web applications from attacks. Web Application Firewall(ModSecurity) is disabled on your server. Web Application Firewall is used to protect web server from various types of attacks such as XSS, bots, SQL-injection, capture session, trojans, session hijacking, etc. Please confirm if you want this enabled."
-            fi
+            ITEM_ISSUE="Web Application Firewall (ModSecurity) is disabled on your server ($MODSEC_REASON)."
+            ITEM_RECOMMENDATION="Mod_Security is disabled. It is reccomended to enable mod_security to protect web applications from attacks. Web Application Firewall(ModSecurity) is disabled on your server. Web Application Firewall is used to protect web server from various types of attacks such as XSS, bots, SQL-injection, capture session, trojans, session hijacking, etc. Please confirm if you want this enabled."
             ;;
         "rootkit_scanner")
-            if [[ "$(portal_status "$ROOTKIT_SCANNER_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Rootkit scanner tools are missing on the server ($ROOTKIT_SCANNER_DETAIL)."
-                ITEM_RECOMMENDATION="Rootkit scanner is missing on the server. We recommend installing rkhunter and chkrootkit to scan for potential rootkit infections."
-            fi
+            ITEM_ISSUE="Rootkit scanner tools are missing on the server ($ROOTKIT_SCANNER_DETAIL)."
+            ITEM_RECOMMENDATION="Rootkit scanner is missing on the server. We recommend installing rkhunter and chkrootkit to scan for potential rootkit infections."
             ;;
         "os_kernel_update")
-            if [[ "$(portal_status "$SYSTEM_UPDATE_STATUS")" == "RED" || "$(portal_status "$KERNEL_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Operating System / Kernel updates available (${KERNEL_UPDATE_COUNT:-0} pending package update(s)):$(get_update_findings_list "$KERNEL_UPDATE_LIST")"
-                ITEM_RECOMMENDATION="Kernel and OS updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
-            fi
+            ITEM_ISSUE="Operating System / Kernel updates available (${KERNEL_UPDATE_COUNT:-0} pending package update(s))"
+            ITEM_RECOMMENDATION="Kernel and OS updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
             ;;
         "php_update")
-            if [[ $PHP_UPDATE_COUNT -gt 0 ]]; then
-                ITEM_ISSUE="PHP package updates are available ($PHP_UPDATE_COUNT pending update(s)):$(get_update_findings_list "$PHP_UPDATE_LIST")"
-                ITEM_RECOMMENDATION="PHP updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
-            fi
+            ITEM_ISSUE="PHP package updates are available (${PHP_UPDATE_COUNT:-0} pending update(s))"
+            ITEM_RECOMMENDATION="PHP updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
             ;;
         "cms_update")
-            if [[ "$(portal_status "$OUTDATED_CMS_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Detected websites with outdated CMS installations:$(get_cms_findings_list)"
-                ITEM_RECOMMENDATION="Detected websites with outdated CMS installations. Please note that outdated CMS are always prone to hacking and attacks. You need to update the CMS to the latest version in order to avoid further attacks in the server."
-            fi
+            ITEM_ISSUE="Detected websites with outdated CMS installations"
+            ITEM_RECOMMENDATION="Detected websites with outdated CMS installations. Please note that outdated CMS are always prone to hacking and attacks. You need to update the CMS to the latest version in order to avoid further attacks in the server."
             ;;
         "web_server_update")
-            if [[ $HTTPD_UPDATE_COUNT -gt 0 ]]; then
-                ITEM_ISSUE="Web server package updates are available ($HTTPD_UPDATE_COUNT pending update(s)):$(get_update_findings_list "$HTTPD_UPDATE_LIST")"
-                ITEM_RECOMMENDATION="Web server updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
-            fi
+            ITEM_ISSUE="Web server package updates are available (${HTTPD_UPDATE_COUNT:-0} pending update(s))"
+            ITEM_RECOMMENDATION="Web server updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
             ;;
         "db_server_update")
-            if [[ $MYSQL_UPDATE_COUNT -gt 0 ]]; then
-                ITEM_ISSUE="Database server package updates are available ($MYSQL_UPDATE_COUNT pending update(s)):$(get_update_findings_list "$MYSQL_UPDATE_LIST")"
-                ITEM_RECOMMENDATION="Database updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
-            fi
+            ITEM_ISSUE="Database server package updates are available (${MYSQL_UPDATE_COUNT:-0} pending update(s))"
+            ITEM_RECOMMENDATION="Database updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
             ;;
         "other_update")
-            if [[ $OTHER_UPDATE_COUNT -gt 0 ]]; then
-                ITEM_ISSUE="Other software updates are available ($OTHER_UPDATE_COUNT pending package(s)):$(get_update_findings_list "$OTHER_UPDATE_LIST")"
-                ITEM_RECOMMENDATION="System package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
-            fi
+            ITEM_ISSUE="Other software updates are available (${OTHER_UPDATE_COUNT:-0} pending package(s))"
+            ITEM_RECOMMENDATION="System package updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
             ;;
         "kernel_update")
-            if [[ "$(portal_status "$KERNEL_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Kernel updates are available ($KERNEL_ANALYSIS):$(get_update_findings_list "$KERNEL_UPDATE_LIST")"
-                ITEM_RECOMMENDATION="Pending kernel updates are available. We recommend scheduling the kernel update during off-peak hours, as a reboot will be required."
-            fi
+            ITEM_ISSUE="Kernel updates are available ($KERNEL_ANALYSIS)"
+            ITEM_RECOMMENDATION="Pending kernel updates are available. We recommend scheduling the kernel update during off-peak hours, as a reboot will be required."
             ;;
         "reboot_required")
-            if [[ "$(portal_status "$REBOOT_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Reboot required on server ($REBOOT_REASON)."
-                ITEM_RECOMMENDATION="Pending system kernel or core package updates require a system reboot. We recommend scheduling the server reboot during off-peak hours to minimize service downtime."
-            fi
+            ITEM_ISSUE="Reboot required on server ($REBOOT_REASON)."
+            ITEM_RECOMMENDATION="Pending system kernel or core package updates require a system reboot. We recommend scheduling the server reboot during off-peak hours to minimize service downtime."
             ;;
         "http_uptime")
-            if [[ "$(portal_status "$HTTP_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Web server service is stopped or failed ($HTTP_STATUS)."
-                ITEM_RECOMMENDATION="Web server service is down. We recommend checking web server error logs and restarting the web service."
-            fi
+            ITEM_ISSUE="Web server service is stopped or failed ($HTTP_STATUS)."
+            ITEM_RECOMMENDATION="Web server service is down. We recommend checking web server error logs and restarting the web service."
             ;;
         "cpu_usage")
-            if [[ "$(portal_status "$CPU_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Server CPU load average is critical (Load: $LOAD)."
-                ITEM_RECOMMENDATION="Server is generating large number of alerts, indicating serious health issues for the server."
-            fi
+            ITEM_ISSUE="Server CPU load average is critical (Load: $LOAD)."
+            ITEM_RECOMMENDATION="Server is generating large number of alerts, indicating serious health issues for the server."
             ;;
         "ram_usage")
-            if [[ "$(portal_status "$RAM_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Server RAM utilization is high (${RAM_PCT}% used)."
-                ITEM_RECOMMENDATION="Server is generating large number of alerts, indicating serious health issues for the server."
-            fi
+            ITEM_ISSUE="Server RAM utilization is high (${RAM_PCT}% used)."
+            ITEM_RECOMMENDATION="Server is generating large number of alerts, indicating serious health issues for the server."
             ;;
         "disk_space")
-            if [[ "$(portal_status "$DISK_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="The disk space is critical on the server, it is reached ${DISK_PCT}% under '/' directory."
-                ITEM_RECOMMENDATION="The disk space is critical on the server, it is reached ${DISK_PCT}% under '/' directory. We recommend clearing unnecessary files or extending disk space."
-            fi
+            ITEM_ISSUE="The disk space is critical on the server, it is reached ${DISK_PCT}% under '/' directory."
+            ITEM_RECOMMENDATION="The disk space is critical on the server, it is reached ${DISK_PCT}% under '/' directory. We recommend clearing unnecessary files or extending disk space."
             ;;
         "email_queue")
-            if [[ "$(portal_status "$EMAIL_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Email queue backlog is high ($EMAIL_QUEUE messages)."
-                ITEM_RECOMMENDATION="Email queue is generating large number of alerts. We recommend inspecting queue messages for potential spam script execution."
-            fi
+            ITEM_ISSUE="Email queue backlog is high ($EMAIL_QUEUE messages)."
+            ITEM_RECOMMENDATION="Email queue is generating large number of alerts. We recommend inspecting queue messages for potential spam script execution."
             ;;
         "ip_reputation")
-            if [[ "$(portal_status "$IP_REPUTATION_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="IP address of the server ($MAIN_IP) is blocked in BARRACUDA and SORBS SPAM ($IP_REPUTATION_DETAIL)."
-                ITEM_RECOMMENDATION="IP address of the server is blocked in BARRACUDA and SORBS SPAM. Kindly check mail logs and apply for delisting."
-            fi
+            ITEM_ISSUE="IP address of the server ($MAIN_IP) is blocked in BARRACUDA and SORBS SPAM ($IP_REPUTATION_DETAIL)."
+            ITEM_RECOMMENDATION="IP address of the server is blocked in BARRACUDA and SORBS SPAM. Kindly check mail logs and apply for delisting."
             ;;
         "local_backup")
-            if [[ "$(portal_status "$BACKUP_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Local backup not found on the server ($BACKUP_DETAIL)."
-                ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
-            fi
+            ITEM_ISSUE="Local backup not found on the server ($BACKUP_DETAIL)."
+            ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
             ;;
         "remote_backup")
-            if [[ "$(portal_status "$BACKUP_REMOTE_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Remote backup not found on the server ($BACKUP_REMOTE_DETAIL)."
-                ITEM_RECOMMENDATION="Remote backup is not configured on the server. We recommend configuring remote backups so that in case of complete server or hardware failure where local backups cannot be recovered, you can safely restore your accounts from an offsite copy."
-            fi
+            ITEM_ISSUE="Remote backup not found on the server ($BACKUP_REMOTE_DETAIL)."
+            ITEM_RECOMMENDATION="Remote backup is not configured on the server. We recommend configuring remote backups so that in case of complete server or hardware failure where local backups cannot be recovered, you can safely restore your accounts from an offsite copy."
             ;;
         "daily_backup")
-            if [[ "$(portal_status "$BACKUP_DAILY_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Daily backup schedule is not configured on the server."
-                ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
-            fi
+            ITEM_ISSUE="Daily backup schedule is not configured on the server."
+            ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
             ;;
         "weekly_backup")
-            if [[ "$(portal_status "$BACKUP_WEEKLY_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Weekly backup schedule is not configured on the server."
-                ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
-            fi
+            ITEM_ISSUE="Weekly backup schedule is not configured on the server."
+            ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
             ;;
         "monthly_backup")
-            if [[ "$(portal_status "$BACKUP_MONTHLY_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Monthly backup schedule is not configured on the server."
-                ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
-            fi
+            ITEM_ISSUE="Monthly backup schedule is not configured on the server."
+            ITEM_RECOMMENDATION="Backup is not configured in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
             ;;
         "backup_retention")
-            if [[ "$(portal_status "$BACKUP_RETENTION_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Backup retention schedule is not configured on the server."
-                ITEM_RECOMMENDATION="We recommend defining a proper backup retention policy to keep safe recovery points."
-            fi
+            ITEM_ISSUE="Backup retention schedule is not configured on the server."
+            ITEM_RECOMMENDATION="We recommend defining a proper backup retention policy to keep safe recovery points."
             ;;
         "backup_last")
-            if [[ "$(portal_status "$BACKUP_LAST_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Recent backup archive is stale or missing ($BACKUP_LAST_DETAIL)."
-                ITEM_RECOMMENDATION="Backup is not configured properly in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
-            fi
+            ITEM_ISSUE="Recent backup archive is stale or missing ($BACKUP_LAST_DETAIL)."
+            ITEM_RECOMMENDATION="Backup is not configured properly in the server. We recommend regular backups to be taken for your account so that in case any critical issue arises, you can safely revert to an old copy of your account."
             ;;
         "backup_size")
-            if [[ "$(portal_status "$BACKUP_SIZE_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Size of last backup archive cannot be verified or is empty."
-                ITEM_RECOMMENDATION="We recommend verifying backup archive files to ensure complete backup copies."
-            fi
+            ITEM_ISSUE="Size of last backup archive cannot be verified or is empty."
+            ITEM_RECOMMENDATION="We recommend verifying backup archive files to ensure complete backup copies."
             ;;
         "os_eol")
-            if [[ "$(portal_status "$EOL_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Running End Of Life Operating system ($OS_NAME $OS_VERSION)."
-                ITEM_RECOMMENDATION="Running End Of Life Operating system is a major security risk as it would contain unpatched vulnerabilities and exploits that could be used to hack your server and steal critical business data & personally identifiable information of your customers. We recommend arranging a migration of websites and services to a new server as soon as possible as it is not feasible to upgrade the End Of Life Operating system."
-            fi
+            ITEM_ISSUE="Running End Of Life Operating system ($OS_NAME $OS_VERSION)."
+            ITEM_RECOMMENDATION="Running End Of Life Operating system is a major security risk as it would contain unpatched vulnerabilities and exploits that could be used to hack your server and steal critical business data & personally identifiable information of your customers. We recommend arranging a migration of websites and services to a new server as soon as possible as it is not feasible to upgrade the End Of Life Operating system."
             ;;
         "software_stack")
-            if [[ "$(portal_status "$PHP_EOL_STATUS")" == "RED" ]]; then
-                local eol_php
-                eol_php=$(get_formatted_eol_php)
-                ITEM_ISSUE="End of Life PHP version(s) detected: $eol_php"
-                ITEM_RECOMMENDATION="$eol_php reached End of Life, and are no longer receiving any security patches from PHP. This means it will no longer have security support and could be exposed to unpatched security vulnerabilities. We recommend to update PHP version to 8.0 or higher."
-            fi
+            local eol_php
+            eol_php=$(get_formatted_eol_php)
+            ITEM_ISSUE="End of Life PHP version(s) detected: $eol_php"
+            ITEM_RECOMMENDATION="$eol_php reached End of Life, and are no longer receiving any security patches from PHP. This means it will no longer have security support and could be exposed to unpatched security vulnerabilities. We recommend to update PHP version to 8.0 or higher."
             ;;
         "tmp_security")
-            if [[ "$(portal_status "$TMP_SEC_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="/tmp directory is not mounted with noexec."
-                ITEM_RECOMMENDATION="/tmp is not secure, which can lead to malicious scripts executing in it. Please confirm if we can secure /tmp."
-            fi
+            ITEM_ISSUE="/tmp directory is not mounted with noexec."
+            ITEM_RECOMMENDATION="/tmp is not secure, which can lead to malicious scripts executing in it. Please confirm if we can secure /tmp."
             ;;
         "reboot_procedure")
-            if [[ "$(portal_status "$REBOOT_PROC_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Remote reboot portal access or reboot procedure details are not documented ($REBOOT_PROC_DETAIL)."
-                ITEM_RECOMMENDATION="We do not have the remote reboot portal access or details. Please submit your Datacenter logins and reboot procedure securely from Bobcares Client Area: https://portal.bobcares.com/website-add , so that we can contact the DC or initiate a reboot in case any issues are noted with the server."
-            fi
+            ITEM_ISSUE="Remote reboot portal access or reboot procedure details are not documented ($REBOOT_PROC_DETAIL)."
+            ITEM_RECOMMENDATION="We do not have the remote reboot portal access or details. Please submit your Datacenter logins and reboot procedure securely from Bobcares Client Area: https://portal.bobcares.com/website-add , so that we can contact the DC or initiate a reboot in case any issues are noted with the server."
             ;;
         "ip_rdns")
-            if [[ "$(portal_status "$RDNS_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="IP RDNS is not configured properly in your server ($RDNS_DETAIL)."
-                ITEM_RECOMMENDATION="IP RDNS is not configured properly in your server."
-            fi
+            ITEM_ISSUE="IP RDNS is not configured properly in your server ($RDNS_DETAIL)."
+            ITEM_RECOMMENDATION="IP RDNS is not configured properly in your server."
             ;;
         "malware_scan")
-            if [[ "$(portal_status "$MALWARE_RESULT_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Malware scripts found in the server ($MALWARE_RESULT_DETAIL):$(get_malware_findings_list)"
-                ITEM_RECOMMENDATION="Malware scripts found in the server. Please see the malware list in the report and let us know if we can go ahead and delete those."
-            fi
+            ITEM_ISSUE="Malware scripts found in the server ($MALWARE_RESULT_DETAIL)."
+            ITEM_RECOMMENDATION="Malware scripts found in the server. Please see the malware list in the report and let us know if we can go ahead and delete those."
             ;;
         "rootkit_check")
-            if [[ "$(portal_status "$ROOTKIT_RESULT_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Rootkit scan flagged suspicious results ($ROOTKIT_RESULT_DETAIL)."
-                ITEM_RECOMMENDATION="Rootkit scan found suspicious items on the server. Please inspect rootkit scan logs and verify server integrity."
-            fi
+            ITEM_ISSUE="Rootkit scan flagged suspicious results ($ROOTKIT_RESULT_DETAIL)."
+            ITEM_RECOMMENDATION="Rootkit scan found suspicious items on the server. Please inspect rootkit scan logs and verify server integrity."
             ;;
         "ssh_root")
-            if [[ "$(portal_status "$ROOT_LOGIN_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Direct SSH root login is enabled in the server (PermitRootLogin: $ROOT_LOGIN_RAW)."
-                ITEM_RECOMMENDATION="Root login is enabled in the server. It's always advisable to disable this feature to enhance server security."
-            fi
+            ITEM_ISSUE="Direct SSH root login is enabled in the server (PermitRootLogin: $ROOT_LOGIN_RAW)."
+            ITEM_RECOMMENDATION="Root login is enabled in the server. It's always advisable to disable this feature to enhance server security."
             ;;
         "php_functions")
-            if [[ "$(portal_status "$PHP_FUNC_STATUS")" == "RED" ]]; then
-                local issue_detail="$PHP_FUNC_DETAIL"
-                if [[ -n "${PHP_INSECURE_LIST:-}" ]]; then
-                    issue_detail="Dangerous PHP functions (exec, shell_exec, system, passthru) are not disabled in: $PHP_INSECURE_LIST"
-                fi
-                ITEM_ISSUE="PHP dangerous functions are found to be enabled on the server ($issue_detail)."
-                ITEM_RECOMMENDATION="PHP dangerous functions are found to be enabled in the server. Dangerous PHP functions can cause security issues on the server. They must be disabled for preventing unauthorized execution of code on the server."
+            local issue_detail="$PHP_FUNC_DETAIL"
+            if [[ -n "${PHP_INSECURE_LIST:-}" ]]; then
+                issue_detail="Dangerous PHP functions (exec, shell_exec, system, passthru) are not disabled in: $PHP_INSECURE_LIST"
             fi
+            ITEM_ISSUE="PHP dangerous functions are found to be enabled on the server ($issue_detail)."
+            ITEM_RECOMMENDATION="PHP dangerous functions are found to be enabled in the server. Dangerous PHP functions can cause security issues on the server. They must be disabled for preventing unauthorized execution of code on the server."
             ;;
         "root_password")
-            if [[ "$(portal_status "$ROOT_PW_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="Root password has not been updated within 90 days (approximately $DAYS_OLD days old)."
-                ITEM_RECOMMENDATION="We recommend updating root password every 90 days to enhance server security."
-            fi
+            ITEM_ISSUE="Root password has not been updated within 90 days (approximately ${DAYS_OLD:-999} days old)."
+            ITEM_RECOMMENDATION="We recommend updating root password every 90 days to enhance server security."
             ;;
         "ssl_certificates")
-            if [[ "$(portal_status "$SSL_STATUS")" == "RED" ]]; then
-                ITEM_ISSUE="SSL certificate is expired ($SSL_EXPIRY)."
-                ITEM_RECOMMENDATION="SSL certificate has expired. We recommend renewing the SSL certificate to prevent browser warnings."
-            fi
+            ITEM_ISSUE="SSL certificate is expired ($SSL_EXPIRY)."
+            ITEM_RECOMMENDATION="SSL certificate has expired. We recommend renewing the SSL certificate to prevent browser warnings."
+            ;;
+        *)
+            ITEM_ISSUE="Issue detected: $label ($det)"
+            ITEM_RECOMMENDATION="Investigate and remediate $label to restore normal system operations."
             ;;
     esac
 }
@@ -2519,11 +2470,1254 @@ EOF
 }
 
 #-------------------------------------------------------------------------------
+# GoAccess-Style Interactive Terminal UI (TUI) Dashboard
+#-------------------------------------------------------------------------------
+
+tui_fit_str() {
+    local str="$1" max_len="$2"
+    if (( ${#str} > max_len )); then
+        if (( max_len > 3 )); then
+            printf '%s…' "${str:0:$((max_len - 1))}"
+        else
+            printf '%.*s' "$max_len" "$str"
+        fi
+    else
+        printf '%-*s' "$max_len" "$str"
+    fi
+}
+
+tui_repeat_char() {
+    local char="$1" count="$2"
+    if (( count <= 0 )); then return; fi
+    local v
+    printf -v v '%*s' "$count" ''
+    printf '%s' "${v// /$char}"
+}
+
+tui_get_cat_items() {
+    local cat_idx="$1"
+    case "$cat_idx" in
+        0)
+            echo "System Firewall|$(portal_status "$SYSTEM_FIREWALL_STATUS")|${SYSTEM_FIREWALL_ANALYSIS:-No firewall}|system_firewall"
+            echo "Malware Scanner|$(portal_status "$MALWARE_SCANNER_STATUS")|${MALWARE_SCANNER_DETAIL:-Missing}|malware_scanner"
+            echo "Failed Login Detection|$(portal_status "$BRUTE_STATUS")|${BRUTE_REASON:-None}|brute_force"
+            echo "Web App Firewall|$(portal_status "$MODSEC_STATUS")|${MODSEC_REASON:-Disabled}|waf"
+            echo "Rootkit Scanner|$(portal_status "$ROOTKIT_SCANNER_STATUS")|${ROOTKIT_SCANNER_DETAIL:-Missing}|rootkit_scanner"
+            ;;
+        1)
+            echo "Operating System / Kernel|$(portal_status "$SYSTEM_UPDATE_STATUS")|${SYSTEM_LATEST:-Up to date}|os_kernel_update"
+            echo "PHP Packages|$([[ ${PHP_UPDATE_COUNT:-0} -gt 0 ]] && echo 'RED' || echo 'GREEN')|${PHP_UPDATE_COUNT:-0} pending updates (Installed: ${PHP_VERSIONS:-None})|php_update"
+            echo "CMS Installations|$(portal_status "$OUTDATED_CMS_STATUS")|${OUTDATED_CMS_DETAIL:-None}|cms_update"
+            echo "Web Server|$([[ ${HTTPD_UPDATE_COUNT:-0} -gt 0 ]] && echo 'RED' || echo 'GREEN')|${HTTPD_UPDATE_COUNT:-0} pending web-server updates|web_server_update"
+            echo "Database Server|$([[ ${MYSQL_UPDATE_COUNT:-0} -gt 0 ]] && echo 'RED' || echo 'GREEN')|${MYSQL_UPDATE_COUNT:-0} pending DB updates|db_server_update"
+            echo "Other Software Packages|$([[ ${OTHER_UPDATE_COUNT:-0} -gt 0 ]] && echo 'RED' || echo 'GREEN')|${OTHER_UPDATE_COUNT:-0} pending other packages|other_update"
+            echo "Kernel Update Status|$(portal_status "$KERNEL_STATUS")|Running: ${KERNEL_RUNNING:-unknown} (Update: ${KERNEL_UPDATE_AVAILABLE:-No})|kernel_update"
+            echo "Reboot Required|$(portal_status "$REBOOT_STATUS")|${REBOOT_REASON:-No reboot needed}|reboot_required"
+            ;;
+        2)
+            echo "Server Uptime|$(portal_status "$UPTIME_STATUS")|${UPTIME:-unknown}|uptime"
+            echo "HTTP Web Server|$(portal_status "$HTTP_STATUS")|${HTTP_UPTIME:-N/A} (${HTTP_STATUS:-Not detected})|http_uptime"
+            echo "CPU Usage|$(portal_status "$CPU_STATUS")|Load average: ${LOAD:-0}|cpu_usage"
+            echo "RAM Usage|$(portal_status "$RAM_STATUS")|${RAM_PCT:-0}% used|ram_usage"
+            echo "Disk Space Usage|$(portal_status "$DISK_STATUS")|${DISK_PCT:-0}% used on /|disk_space"
+            echo "Email Queue|$(portal_status "$EMAIL_STATUS")|Queued messages: ${EMAIL_QUEUE:-N/A}|email_queue"
+            echo "IP Reputation (DNSBL)|$(portal_status "$IP_REPUTATION_STATUS")|${IP_REPUTATION_DETAIL:-Good}|ip_reputation"
+            ;;
+        3)
+            echo "Local Backup|$(portal_status "$BACKUP_STATUS")|${BACKUP_DETAIL:-None}|local_backup"
+            echo "Remote Backup|$(portal_status "$BACKUP_REMOTE_STATUS")|${BACKUP_REMOTE_DETAIL:-Not configured}|remote_backup"
+            echo "Daily Backup|$(portal_status "$BACKUP_DAILY_STATUS")|${BACKUP_DAILY_DETAIL:-N/A}|daily_backup"
+            echo "Weekly Backup|$(portal_status "$BACKUP_WEEKLY_STATUS")|${BACKUP_WEEKLY_DETAIL:-N/A}|weekly_backup"
+            echo "Monthly Backup|$(portal_status "$BACKUP_MONTHLY_STATUS")|${BACKUP_MONTHLY_DETAIL:-N/A}|monthly_backup"
+            echo "Backup Retention|$(portal_status "$BACKUP_RETENTION_STATUS")|${BACKUP_RETENTION_DETAIL:-N/A}|backup_retention"
+            echo "Recent Last Backup|$(portal_status "$BACKUP_LAST_STATUS")|${BACKUP_LAST_DETAIL:-None}|backup_last"
+            echo "Size Of Last Backup|$(portal_status "$BACKUP_SIZE_STATUS")|${BACKUP_SIZE_DETAIL:-N/A}|backup_size"
+            ;;
+        4)
+            echo "Control Panel|N/A|No control panel installed on this server|control_panel"
+            echo "Operating System EOL|$(portal_status "$EOL_STATUS")|${DISTRO_NAME:-Linux} ${OS_VERSION:-} (${EOL_STATUS:-Supported})|os_eol"
+            echo "Software Stack (PHP)|$(portal_status "$PHP_EOL_STATUS")|${PHP_EOL_DETAIL:-All versions supported}|software_stack"
+            echo "CMS Lifetime|$(portal_status "$OUTDATED_CMS_STATUS")|${OUTDATED_CMS_DETAIL:-None}|cms_update"
+            ;;
+        5)
+            echo "/tmp Security|$(portal_status "$TMP_SEC_STATUS")|${TMP_SEC_DETAIL:-Warning}|tmp_security"
+            echo "Reboot Procedure|$(portal_status "$REBOOT_PROC_STATUS")|${REBOOT_PROC_DETAIL:-Manual}|reboot_procedure"
+            echo "IP RDNS (PTR)|$(portal_status "$RDNS_STATUS")|${RDNS_DETAIL:-Missing}|ip_rdns"
+            echo "Malware Scan Results|$(portal_status "$MALWARE_RESULT_STATUS")|${MALWARE_RESULT_DETAIL:-No report}|malware_scan"
+            echo "Rootkit Check Results|$(portal_status "$ROOTKIT_RESULT_STATUS")|${ROOTKIT_RESULT_DETAIL:-Review}|rootkit_check"
+            echo "SSH Root Access Security|$(portal_status "$ROOT_LOGIN_STATUS")|PermitRoot: ${ROOT_LOGIN_RAW:-unknown}; PassAuth: ${SSH_PASSWORD_AUTH:-unknown}; Port: ${SSH_PORT:-22}|ssh_root"
+            echo "PHP Functions Security|$(portal_status "$PHP_FUNC_STATUS")|${PHP_FUNC_DETAIL:-Not set}|php_functions"
+            echo "Root Password Health|$(portal_status "$ROOT_PW_STATUS")|Root password changed ~${DAYS_OLD:-999} days ago|root_password"
+            echo "SSL Certificates|$(portal_status "$SSL_STATUS")|${SSL_EXPIRY:-None}|ssl_certificates"
+            ;;
+    esac
+}
+
+tui_get_all_red_items() {
+    local c line label st det key
+    for (( c=0; c<=5; c++ )); do
+        while IFS='|' read -r label st det key; do
+            [[ -z "$label" ]] && continue
+            if [[ "$st" == "RED" ]]; then
+                echo "$label|$st|$det|$key"
+            fi
+        done < <(tui_get_cat_items "$c")
+    done
+}
+
+tui_get_item_details() {
+    local key="$1" label="$2" st="$3" det="$4"
+    ITEM_ISSUE=""
+    ITEM_FINDINGS=""
+    ITEM_RECOMMENDATION=""
+    local NL=$'\n'
+
+    # If item is RED, load canonical Bobcares issue and recommendation
+    if [[ "$st" == "RED" ]]; then
+        get_red_issue_and_rec "$key"
+    fi
+
+    case "$key" in
+        "other_update")
+            if [[ "$st" == "RED" ]]; then
+                local pkgs=""
+                if [[ -n "$OTHER_UPDATE_LIST" ]]; then
+                    pkgs="$OTHER_UPDATE_LIST"
+                elif [[ -f "$FINDINGS_FILE" ]] && grep -q "OTHER SOFTWARE UPDATES" "$FINDINGS_FILE" 2>/dev/null; then
+                    pkgs=$(awk '/^OTHER SOFTWARE UPDATES/{flag=1; next} flag && /^===/{if(seen){exit}else{seen=1; next}} flag && seen{print}' "$FINDINGS_FILE" 2>/dev/null | grep -v '^None$' || true)
+                elif command -v apt >/dev/null 2>&1; then
+                    pkgs=$(apt list --upgradable 2>/dev/null | grep -E '^\S+/' | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|apache2|httpd|nginx|mariadb|mysql|linux-)' || true)
+                elif command -v dnf >/dev/null 2>&1; then
+                    pkgs=$(dnf check-update -q 2>/dev/null | grep -v '^\s*$' | grep -Evi '(kernel|linux-firmware|php|httpd|nginx|mariadb|mysql)' || true)
+                elif command -v yum >/dev/null 2>&1; then
+                    pkgs=$(yum check-update -q 2>/dev/null | grep -v '^\s*$' | grep -Evi '(kernel|linux-firmware|php|httpd|nginx|mariadb|mysql)' || true)
+                fi
+                if [[ -z "$OTHER_UPDATE_COUNT" || "$OTHER_UPDATE_COUNT" -eq 0 ]] && [[ -n "$pkgs" ]]; then
+                    OTHER_UPDATE_COUNT=$(printf '%s\n' "$pkgs" | grep -c . || echo 0)
+                fi
+                ITEM_ISSUE="Other software updates are available (${OTHER_UPDATE_COUNT:-0} pending package(s))"
+                ITEM_FINDINGS="$pkgs"
+            else
+                ITEM_FINDINGS="All general system software packages are up to date."
+                ITEM_RECOMMENDATION="System package currency is optimal. No action required."
+            fi
+            ;;
+        "os_kernel_update"|"kernel_update")
+            if [[ "$st" == "RED" ]]; then
+                local kpkgs=""
+                if [[ -n "$KERNEL_UPDATE_LIST" ]]; then
+                    kpkgs="$KERNEL_UPDATE_LIST"
+                elif [[ -f "$FINDINGS_FILE" ]] && grep -q "OPERATING SYSTEM / KERNEL UPDATES" "$FINDINGS_FILE" 2>/dev/null; then
+                    kpkgs=$(awk '/^OPERATING SYSTEM \/ KERNEL UPDATES/{flag=1; next} flag && /^===/{if(seen){exit}else{seen=1; next}} flag && seen{print}' "$FINDINGS_FILE" 2>/dev/null | grep -v '^None$' || true)
+                elif command -v apt >/dev/null 2>&1; then
+                    kpkgs=$(apt list --upgradable 2>/dev/null | grep -E '^linux-(base|image|headers|modules|generic|tools|firmware)' || true)
+                elif command -v dnf >/dev/null 2>&1; then
+                    kpkgs=$(dnf check-update -q 2>/dev/null | grep -Ei 'kernel|linux-firmware' || true)
+                elif command -v yum >/dev/null 2>&1; then
+                    kpkgs=$(yum check-update -q 2>/dev/null | grep -Ei 'kernel|linux-firmware' || true)
+                fi
+                if [[ -z "$KERNEL_UPDATE_COUNT" || "$KERNEL_UPDATE_COUNT" -eq 0 ]] && [[ -n "$kpkgs" ]]; then
+                    KERNEL_UPDATE_COUNT=$(printf '%s\n' "$kpkgs" | grep -c . || echo 0)
+                fi
+                ITEM_ISSUE="Operating System / Kernel updates available (${KERNEL_UPDATE_COUNT:-0} pending update(s))"
+                ITEM_FINDINGS="Running Kernel: ${KERNEL_RUNNING:-$(uname -r)}${NL}${kpkgs:-Kernel update available}"
+            else
+                ITEM_FINDINGS="Running Kernel: ${KERNEL_RUNNING:-$(uname -r)}${NL}Kernel Packages: Up to date"
+                ITEM_RECOMMENDATION="Kernel version is supported and current. No reboot or updates required."
+            fi
+            ;;
+        "php_update")
+            if [[ "$st" == "RED" ]]; then
+                local php_pkgs=""
+                if [[ -n "$PHP_UPDATE_LIST" ]]; then
+                    php_pkgs="$PHP_UPDATE_LIST"
+                elif [[ -f "$FINDINGS_FILE" ]] && grep -q "PHP UPDATES" "$FINDINGS_FILE" 2>/dev/null; then
+                    php_pkgs=$(awk '/^PHP UPDATES/{flag=1; next} flag && /^===/{if(seen){exit}else{seen=1; next}} flag && seen{print}' "$FINDINGS_FILE" 2>/dev/null | grep -v '^None$' || true)
+                elif command -v apt >/dev/null 2>&1; then
+                    php_pkgs=$(apt list --upgradable 2>/dev/null | grep -Ei '(php[0-9.]*|ea-php|alt-php)' || true)
+                elif command -v dnf >/dev/null 2>&1; then
+                    php_pkgs=$(dnf check-update -q 2>/dev/null | grep -Ei '(php|ea-php|alt-php)' || true)
+                fi
+                if [[ -z "$PHP_UPDATE_COUNT" || "$PHP_UPDATE_COUNT" -eq 0 ]] && [[ -n "$php_pkgs" ]]; then
+                    PHP_UPDATE_COUNT=$(printf '%s\n' "$php_pkgs" | grep -c . || echo 0)
+                fi
+                ITEM_ISSUE="PHP package updates are available (${PHP_UPDATE_COUNT:-0} pending update(s))"
+                ITEM_FINDINGS="Installed PHP: ${PHP_VERSIONS:-None}${NL}${php_pkgs:-Pending PHP package updates detected}"
+            else
+                ITEM_FINDINGS="Installed PHP: ${PHP_VERSIONS:-None}${NL}Status: All installed PHP packages are up to date."
+                ITEM_RECOMMENDATION="PHP stack packages are current. No action required."
+            fi
+            ;;
+        "web_server_update")
+            if [[ "$st" == "RED" ]]; then
+                local http_pkgs=""
+                if [[ -n "$HTTPD_UPDATE_LIST" ]]; then
+                    http_pkgs="$HTTPD_UPDATE_LIST"
+                elif [[ -f "$FINDINGS_FILE" ]] && grep -q "WEB SERVER UPDATES" "$FINDINGS_FILE" 2>/dev/null; then
+                    http_pkgs=$(awk '/^WEB SERVER UPDATES/{flag=1; next} flag && /^===/{if(seen){exit}else{seen=1; next}} flag && seen{print}' "$FINDINGS_FILE" 2>/dev/null | grep -v '^None$' || true)
+                elif command -v apt >/dev/null 2>&1; then
+                    http_pkgs=$(apt list --upgradable 2>/dev/null | grep -Ei '(apache2|nginx|httpd|lighttpd)' || true)
+                elif command -v dnf >/dev/null 2>&1; then
+                    http_pkgs=$(dnf check-update -q 2>/dev/null | grep -Ei '(httpd|nginx|lighttpd)' || true)
+                fi
+                if [[ -z "$HTTPD_UPDATE_COUNT" || "$HTTPD_UPDATE_COUNT" -eq 0 ]] && [[ -n "$http_pkgs" ]]; then
+                    HTTPD_UPDATE_COUNT=$(printf '%s\n' "$http_pkgs" | grep -c . || echo 0)
+                fi
+                ITEM_ISSUE="Web server package updates are available (${HTTPD_UPDATE_COUNT:-0} pending update(s))"
+                ITEM_FINDINGS="${http_pkgs:-Web server package updates pending}"
+            else
+                ITEM_FINDINGS="Web server software packages are current."
+                ITEM_RECOMMENDATION="Web server is running latest installed release."
+            fi
+            ;;
+        "db_server_update")
+            if [[ "$st" == "RED" ]]; then
+                local db_pkgs=""
+                if [[ -n "$MYSQL_UPDATE_LIST" ]]; then
+                    db_pkgs="$MYSQL_UPDATE_LIST"
+                elif [[ -f "$FINDINGS_FILE" ]] && grep -q "DATABASE UPDATES" "$FINDINGS_FILE" 2>/dev/null; then
+                    db_pkgs=$(awk '/^DATABASE UPDATES/{flag=1; next} flag && /^===/{if(seen){exit}else{seen=1; next}} flag && seen{print}' "$FINDINGS_FILE" 2>/dev/null | grep -v '^None$' || true)
+                elif command -v apt >/dev/null 2>&1; then
+                    db_pkgs=$(apt list --upgradable 2>/dev/null | grep -Ei '(mariadb|mysql|postgresql|percona)' || true)
+                elif command -v dnf >/dev/null 2>&1; then
+                    db_pkgs=$(dnf check-update -q 2>/dev/null | grep -Ei '(mariadb|mysql|postgresql|percona)' || true)
+                fi
+                if [[ -z "$MYSQL_UPDATE_COUNT" || "$MYSQL_UPDATE_COUNT" -eq 0 ]] && [[ -n "$db_pkgs" ]]; then
+                    MYSQL_UPDATE_COUNT=$(printf '%s\n' "$db_pkgs" | grep -c . || echo 0)
+                fi
+                ITEM_ISSUE="Database server package updates are available (${MYSQL_UPDATE_COUNT:-0} pending update(s))"
+                ITEM_FINDINGS="${db_pkgs:-Database package updates pending}"
+            else
+                ITEM_FINDINGS="Database server packages are current."
+                ITEM_RECOMMENDATION="Database packages are up to date."
+            fi
+            ;;
+        "cms_update")
+            if [[ "$st" == "RED" ]]; then
+                local cms_out=""
+                if [[ -f /root/scripts/outdated-cms-report.txt ]]; then
+                    cms_out=$(cat /root/scripts/outdated-cms-report.txt 2>/dev/null || true)
+                elif [[ -f "$FINDINGS_FILE" ]] && grep -q "CMS UPDATE REPORT" "$FINDINGS_FILE" 2>/dev/null; then
+                    cms_out=$(awk '/^CMS UPDATE REPORT/{flag=1; next} flag && /^===/{if(seen){exit}else{seen=1; next}} flag && seen{print}' "$FINDINGS_FILE" 2>/dev/null | grep -v '^None$' || true)
+                fi
+                ITEM_FINDINGS="${cms_out:-$OUTDATED_CMS_DETAIL}"
+            else
+                ITEM_FINDINGS="${OUTDATED_CMS_DETAIL:-No outdated CMS installations detected on this server.}"
+                ITEM_RECOMMENDATION="CMS versions are current or no CMS installations detected."
+            fi
+            ;;
+        "reboot_required")
+            if [[ "$st" == "RED" ]]; then
+                local r_pkgs=""
+                if [[ -f /var/run/reboot-required.pkgs ]]; then
+                    r_pkgs=$(cat /var/run/reboot-required.pkgs 2>/dev/null || true)
+                fi
+                ITEM_FINDINGS="${r_pkgs:-$REBOOT_REASON}"
+            else
+                ITEM_FINDINGS="No reboot required. Kernel and core libraries are active."
+                ITEM_RECOMMENDATION="System does not require a reboot."
+            fi
+            ;;
+        "system_firewall")
+            local fw_ports=""
+            if command -v ss >/dev/null 2>&1; then
+                fw_ports=$(ss -tlpn 2>/dev/null | grep -E 'LISTEN\s+[0-9]' | awk '{print $4}' | awk -F: '{print $NF}' | sort -un | paste -sd ', ' - || true)
+            elif command -v netstat >/dev/null 2>&1; then
+                fw_ports=$(netstat -tlpn 2>/dev/null | grep LISTEN | awk '{print $4}' | awk -F: '{print $NF}' | sort -un | paste -sd ', ' - || true)
+            fi
+            local ufw_st=""
+            if command -v ufw >/dev/null 2>&1; then
+                ufw_st=$(ufw status 2>/dev/null | head -1 || true)
+            fi
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Firewall Status: Inactive / Missing (${ufw_st:-ufw inactive})${NL}Open Listening Ports: ${fw_ports:-unknown}${NL}Analysis: ${SYSTEM_FIREWALL_ANALYSIS:-None}"
+            else
+                ITEM_FINDINGS="Firewall Status: ${SYSTEM_FIREWALL_ANALYSIS:-Active} (${ufw_st:-Active})${NL}Open Listening Ports: ${fw_ports:-None}"
+                ITEM_RECOMMENDATION="Firewall is active and filtering incoming traffic."
+            fi
+            ;;
+        "malware_scanner"|"malware_scan")
+            if [[ "$st" == "RED" ]]; then
+                local m_files=""
+                if [[ -f /root/scripts/malware-details-report.txt ]]; then
+                    m_files=$(grep -E '^(File|Infection|FOUND):' /root/scripts/malware-details-report.txt 2>/dev/null | head -20 || true)
+                elif [[ -f /root/scripts/malware-files.txt ]]; then
+                    m_files=$(head -20 /root/scripts/malware-files.txt 2>/dev/null || true)
+                elif [[ -f "$FINDINGS_FILE" ]] && grep -q "MALWARE" "$FINDINGS_FILE" 2>/dev/null; then
+                    m_files=$(awk '/^MALWARE/{flag=1; next} flag && /^===/{if(seen){exit}else{seen=1; next}} flag && seen{print}' "$FINDINGS_FILE" 2>/dev/null | grep -v '^None$' | head -20 || true)
+                fi
+                ITEM_FINDINGS="${m_files:-$MALWARE_RESULT_DETAIL}"
+            else
+                ITEM_FINDINGS="Scanner: ${MALWARE_SCANNER_DETAIL:-Active}${NL}Scan Results: Clean, no malware signatures detected."
+                ITEM_RECOMMENDATION="Malware scanning protection is operating normally."
+            fi
+            ;;
+        "brute_force")
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Brute Force Status: Inactive${NL}Reason: ${BRUTE_REASON:-Fail2Ban service not running}"
+            else
+                ITEM_FINDINGS="Service: Fail2Ban / Brute force daemon is active.${NL}Jails: Monitoring active authentication logs."
+                ITEM_RECOMMENDATION="Brute-force protection is operating normally."
+            fi
+            ;;
+        "waf")
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="ModSecurity: Disabled or missing in web server configuration."
+            else
+                ITEM_FINDINGS="ModSecurity / WAF is enabled and actively filtering HTTP traffic."
+                ITEM_RECOMMENDATION="Web Application Firewall is active."
+            fi
+            ;;
+        "rootkit_scanner"|"rootkit_check")
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Status: ${ROOTKIT_RESULT_DETAIL:-Rootkit tools missing}${NL}Recommended Tools: rkhunter, chkrootkit"
+            else
+                ITEM_FINDINGS="Rootkit Scanner: ${ROOTKIT_SCANNER_DETAIL:-Installed}${NL}Scan Status: Clean"
+                ITEM_RECOMMENDATION="Rootkit scanner is in place and verified."
+            fi
+            ;;
+        "uptime")
+            ITEM_FINDINGS="Uptime: ${UPTIME:-$(uptime -p 2>/dev/null || uptime)}${NL}Load Averages: ${LOAD:-$(uptime | awk -F'load average:' '{print $2}')}"
+            ITEM_RECOMMENDATION="Server availability and uptime are normal."
+            ;;
+        "http_uptime")
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="HTTP Service: ${HTTP_STATUS:-Down}${NL}Ports 80/443: Not responding"
+            else
+                ITEM_FINDINGS="Web Server Service: Active${NL}Uptime: ${HTTP_UPTIME:-Normal}${NL}Ports: 80 / 443 listening"
+                ITEM_RECOMMENDATION="Web server is operating normally."
+            fi
+            ;;
+        "cpu_usage")
+            local top_cpu=""
+            if command -v ps >/dev/null 2>&1; then
+                top_cpu=$(ps -eo pid,pcpu,pmem,comm --sort=-pcpu 2>/dev/null | head -6 || true)
+            fi
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Current Load: ${LOAD:-0}${NL}Top CPU Consumers:${NL}${top_cpu:-N/A}"
+            else
+                ITEM_FINDINGS="Load Average: ${LOAD:-0}${NL}Top Processes:${NL}${top_cpu:-N/A}"
+                ITEM_RECOMMENDATION="CPU load is within healthy operating limits."
+            fi
+            ;;
+        "ram_usage")
+            local mem_summary="" top_mem=""
+            if command -v free >/dev/null 2>&1; then
+                mem_summary=$(free -h 2>/dev/null || true)
+            fi
+            if command -v ps >/dev/null 2>&1; then
+                top_mem=$(ps -eo pid,pmem,pcpu,comm --sort=-pmem 2>/dev/null | head -6 || true)
+            fi
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Memory Summary:${NL}${mem_summary:-${RAM_PCT}% used}${NL}Top Memory Consumers:${NL}${top_mem:-N/A}"
+            else
+                ITEM_FINDINGS="Memory Summary:${NL}${mem_summary:-${RAM_PCT}% used}${NL}Top Memory Consumers:${NL}${top_mem:-N/A}"
+                ITEM_RECOMMENDATION="RAM usage is within healthy thresholds."
+            fi
+            ;;
+        "disk_space")
+            local df_summary=""
+            if command -v df >/dev/null 2>&1; then
+                df_summary=$(df -h -x tmpfs -x devtmpfs -x squashfs 2>/dev/null || true)
+            fi
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Filesystem Breakdown:${NL}${df_summary:-${DISK_PCT}% used on /}"
+            else
+                ITEM_FINDINGS="Filesystem Breakdown:${NL}${df_summary:-${DISK_PCT}% used on /}"
+                ITEM_RECOMMENDATION="Disk utilization is within healthy limits."
+            fi
+            ;;
+        "email_queue")
+            local mq=""
+            if command -v mailq >/dev/null 2>&1; then
+                mq=$(mailq 2>/dev/null | tail -1 || true)
+            fi
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Queue Summary: ${mq:-${EMAIL_QUEUE:-0} messages queued}"
+            else
+                ITEM_FINDINGS="Queue Status: Clean (${mq:-${EMAIL_QUEUE:-0} messages})"
+                ITEM_RECOMMENDATION="Email queue is normal."
+            fi
+            ;;
+        "ip_reputation")
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Blacklist Detail: ${IP_REPUTATION_DETAIL:-Listed in DNSBL}${NL}Server IP: $MAIN_IP"
+            else
+                ITEM_FINDINGS="Server IP ($MAIN_IP) checked against Spamhaus, Barracuda, SORBS, SpamCop.${NL}Status: Clean, not blacklisted."
+                ITEM_RECOMMENDATION="IP reputation is healthy."
+            fi
+            ;;
+        "local_backup"|"remote_backup"|"daily_backup"|"weekly_backup"|"monthly_backup"|"backup_retention"|"backup_last"|"backup_size")
+            local cron_backups=""
+            if command -v crontab >/dev/null 2>&1; then
+                cron_backups=$(crontab -l 2>/dev/null | grep -Ei 'backup|dump|tar|rsync|rclone|s3' || true)
+            fi
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Backup Status: $det${NL}Detected Crontab Backups:${NL}${cron_backups:-None detected in crontab}"
+            else
+                ITEM_FINDINGS="Backup Configuration: $det${NL}Crontab Backups:${NL}${cron_backups:-Configured or managed externally}"
+                ITEM_RECOMMENDATION="Backup configuration verified."
+            fi
+            ;;
+        "control_panel")
+            ITEM_FINDINGS="Control Panel: None (Standard Linux server)${NL}Package Management: ${PKG_MGR:-apt/dnf}"
+            ITEM_RECOMMENDATION="Server is configured as a standalone Linux installation."
+            ;;
+        "os_eol")
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Distribution: $DISTRO_NAME${NL}Version: $OS_VERSION${NL}EOL Status: Expired"
+            else
+                ITEM_FINDINGS="Distribution: $DISTRO_NAME${NL}Version: $OS_VERSION${NL}Support Status: Actively supported"
+                ITEM_RECOMMENDATION="OS release is supported."
+            fi
+            ;;
+        "software_stack")
+            local eol_php=""
+            if command -v get_formatted_eol_php >/dev/null 2>&1; then
+                eol_php=$(get_formatted_eol_php 2>/dev/null || true)
+            fi
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Installed PHP: ${PHP_VERSIONS:-None}${NL}EOL Versions: ${eol_php:-$PHP_EOL_DETAIL}"
+            else
+                ITEM_FINDINGS="Installed PHP: ${PHP_VERSIONS:-None}${NL}Status: All versions are actively supported."
+                ITEM_RECOMMENDATION="PHP stack is current."
+            fi
+            ;;
+        "tmp_security")
+            local tmp_mnt=""
+            if command -v findmnt >/dev/null 2>&1; then
+                tmp_mnt=$(findmnt /tmp 2>/dev/null || true)
+            fi
+            if [[ -z "$tmp_mnt" ]]; then
+                tmp_mnt=$(grep -E '\s+/tmp\s+' /proc/mounts 2>/dev/null || echo "/tmp on root filesystem")
+            fi
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Mount Info:${NL}${tmp_mnt:-/tmp on root filesystem}${NL}Required Options: noexec, nosuid, nodev"
+            else
+                ITEM_FINDINGS="Mount Info:${NL}${tmp_mnt:-Mounted with secure options}${NL}Status: Secured"
+                ITEM_RECOMMENDATION="/tmp filesystem is securely mounted."
+            fi
+            ;;
+        "reboot_procedure")
+            ITEM_FINDINGS="Procedure: ${REBOOT_PROC_DETAIL:-Manual reboot required}"
+            if [[ "$st" != "RED" ]]; then
+                ITEM_RECOMMENDATION="Document remote reboot portal access securely in client area."
+            fi
+            ;;
+        "ip_rdns")
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="IP: $MAIN_IP${NL}PTR Record: ${RDNS_DETAIL:-None}"
+            else
+                ITEM_FINDINGS="IP: $MAIN_IP${NL}PTR Record: ${RDNS_DETAIL:-Valid}"
+                ITEM_RECOMMENDATION="Reverse DNS is configured properly."
+            fi
+            ;;
+        "ssh_root")
+            local ssh_details="PermitRootLogin: ${ROOT_LOGIN_RAW:-unknown}${NL}PasswordAuthentication: ${SSH_PASSWORD_AUTH:-unknown}${NL}SSH Port: ${SSH_PORT:-22}${NL}Config File: /etc/ssh/sshd_config"
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="$ssh_details"
+            else
+                ITEM_FINDINGS="$ssh_details"
+                ITEM_RECOMMENDATION="SSH daemon security configuration is optimal."
+            fi
+            ;;
+        "php_functions")
+            local php_fn_details="${PHP_INSECURE_LIST:-$PHP_FUNC_DETAIL}"
+            if [[ -z "$php_fn_details" && -f "$FINDINGS_FILE" ]] && grep -q "DANGEROUS PHP FUNCTIONS" "$FINDINGS_FILE" 2>/dev/null; then
+                php_fn_details=$(awk '/^DANGEROUS PHP FUNCTIONS/{flag=1; next} flag && /^===/{if(seen){exit}else{seen=1; next}} flag && seen{print}' "$FINDINGS_FILE" 2>/dev/null | grep -v '^None$' || true)
+            fi
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Insecure Directives:${NL}${php_fn_details:-Functions like exec, shell_exec, system are enabled}${NL}Target: disable_functions = exec,shell_exec,system,passthru,proc_open"
+            else
+                ITEM_FINDINGS="PHP Functions Security: Optimal${NL}Status: Dangerous functions are disabled."
+                ITEM_RECOMMENDATION="PHP execution security is enforced."
+            fi
+            ;;
+        "root_password")
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Password Age: ~${DAYS_OLD:-999} days (Exceeds 90 days recommended threshold)"
+            else
+                ITEM_FINDINGS="Password Age: ~${DAYS_OLD:-0} days (Within healthy threshold)"
+                ITEM_RECOMMENDATION="Root password age is healthy."
+            fi
+            ;;
+        "ssl_certificates")
+            if [[ "$st" == "RED" ]]; then
+                ITEM_FINDINGS="Certificate Status: ${SSL_EXPIRY:-Expired}"
+            else
+                ITEM_FINDINGS="Certificate Status: ${SSL_EXPIRY:-Valid}"
+                ITEM_RECOMMENDATION="SSL certificates are valid."
+            fi
+            ;;
+        *)
+            if [[ "$st" == "RED" ]]; then
+                ITEM_ISSUE="Issue detected: $label ($det)"
+                ITEM_RECOMMENDATION="Investigate and remediate $label to restore normal system operations."
+            else
+                ITEM_RECOMMENDATION="Component status verified."
+            fi
+            ITEM_FINDINGS="$det"
+            ;;
+    esac
+
+    # Universal safety check: Guarantee Issue and Recommendation for any RED finding
+    if [[ "$st" == "RED" ]]; then
+        [[ -z "$ITEM_ISSUE" ]] && ITEM_ISSUE="Issue detected: $label ($det)"
+        [[ -z "$ITEM_RECOMMENDATION" ]] && ITEM_RECOMMENDATION="Investigate and remediate $label to restore normal system operations."
+    fi
+}
+
+run_audit_tui() {
+    local use_fd3=false
+
+    if [ -c /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        exec 3<>/dev/tty
+        use_fd3=true
+    fi
+
+    # Save original terminal settings and enter raw mode
+    local old_stty=""
+    if $use_fd3; then
+        old_stty=$(stty -g <&3 2>/dev/null)
+        stty raw -echo min 1 time 0 <&3 2>/dev/null
+    fi
+
+    local C_RESET=$'\033[0m'
+    local C_BOLD=$'\033[1m'
+    local C_DIM=$'\033[2m'
+    local C_RED=$'\033[1;31m'
+    local C_GREEN=$'\033[1;32m'
+    local C_YELLOW=$'\033[1;33m'
+    local C_BLUE=$'\033[1;34m'
+    local C_MAGENTA=$'\033[1;35m'
+    local C_CYAN=$'\033[1;36m'
+    local C_WHITE=$'\033[1;37m'
+    local C_GREY=$'\033[90m'
+    local C_DARKGREY=$'\033[38;5;240m'
+
+    local BG_HEADER=$'\033[48;5;24;1;37m'
+    local BG_SUBHDR=$'\033[48;5;236;37m'
+    local BG_ACTIVE=$'\033[48;5;31;1;37m'
+    local BG_INACTIVE_SEL=$'\033[48;5;238;1;37m'
+    local BG_FOOTER=$'\033[48;5;235;37m'
+    local BG_RED=$'\033[41;1;37m'
+    local BG_GREEN=$'\033[42;1;30m'
+    local BG_YELLOW=$'\033[43;1;30m'
+    local BG_GREY=$'\033[100;1;37m'
+
+    tui_badge() {
+        case "$1" in
+            "GREEN") printf '%b[  OK  ]%b' "$C_GREEN" "$C_RESET" ;;
+            "RED")   printf '%b[ RED  ]%b' "$BG_RED" "$C_RESET" ;;
+            "CHECK") printf '%b[ WARN ]%b' "$C_YELLOW" "$C_RESET" ;;
+            *)       printf '%b[ N/A  ]%b' "$C_GREY" "$C_RESET" ;;
+        esac
+    }
+
+    tui_cleanup() {
+        if $use_fd3; then
+            printf '\033[?25h\033[?1049l' >&3 2>/dev/null
+            [[ -n "$old_stty" ]] && stty "$old_stty" <&3 2>/dev/null
+            exec 3>&- 3<&- 2>/dev/null
+        fi
+    }
+    trap 'tui_cleanup; exit 0' INT TERM
+    trap 'tui_cleanup' EXIT
+
+    if $use_fd3; then
+        printf '\033[?1049h\033[?25l' >&3
+    fi
+
+    local cat_names=(
+        "Threat Protection"
+        "Software Updates"
+        "Server Health"
+        "Backup"
+        "Software Life Time"
+        "Proactive Defence"
+        "Critical Issues (RED)"
+        "Findings Log"
+        "Smart Summary (MD)"
+    )
+
+    # Pre-cache all items, issues, detailed findings, and recommendations in memory
+    local -a cat_items_0=() cat_items_1=() cat_items_2=() cat_items_3=() cat_items_4=() cat_items_5=() cat_items_6=()
+    local -a cat_issues_0=() cat_issues_1=() cat_issues_2=() cat_issues_3=() cat_issues_4=() cat_issues_5=() cat_issues_6=()
+    local -a cat_findings_0=() cat_findings_1=() cat_findings_2=() cat_findings_3=() cat_findings_4=() cat_findings_5=() cat_findings_6=()
+    local -a cat_recs_0=() cat_recs_1=() cat_recs_2=() cat_recs_3=() cat_recs_4=() cat_recs_5=() cat_recs_6=()
+    local -a cat_red_counts=(0 0 0 0 0 0 0 0 0)
+    local total_red=0
+
+    local c raw_items=() line label st det key
+    for (( c=0; c<=5; c++ )); do
+        mapfile -t raw_items < <(tui_get_cat_items "$c")
+        for line in "${raw_items[@]}"; do
+            [[ -z "$line" ]] && continue
+            IFS='|' read -r label st det key <<< "$line"
+            ITEM_ISSUE=""
+            ITEM_FINDINGS=""
+            ITEM_RECOMMENDATION=""
+            tui_get_item_details "$key" "$label" "$st" "$det"
+            case "$c" in
+                0) cat_items_0+=("$line"); cat_issues_0+=("$ITEM_ISSUE"); cat_findings_0+=("$ITEM_FINDINGS"); cat_recs_0+=("$ITEM_RECOMMENDATION") ;;
+                1) cat_items_1+=("$line"); cat_issues_1+=("$ITEM_ISSUE"); cat_findings_1+=("$ITEM_FINDINGS"); cat_recs_1+=("$ITEM_RECOMMENDATION") ;;
+                2) cat_items_2+=("$line"); cat_issues_2+=("$ITEM_ISSUE"); cat_findings_2+=("$ITEM_FINDINGS"); cat_recs_2+=("$ITEM_RECOMMENDATION") ;;
+                3) cat_items_3+=("$line"); cat_issues_3+=("$ITEM_ISSUE"); cat_findings_3+=("$ITEM_FINDINGS"); cat_recs_3+=("$ITEM_RECOMMENDATION") ;;
+                4) cat_items_4+=("$line"); cat_issues_4+=("$ITEM_ISSUE"); cat_findings_4+=("$ITEM_FINDINGS"); cat_recs_4+=("$ITEM_RECOMMENDATION") ;;
+                5) cat_items_5+=("$line"); cat_issues_5+=("$ITEM_ISSUE"); cat_findings_5+=("$ITEM_FINDINGS"); cat_recs_5+=("$ITEM_RECOMMENDATION") ;;
+            esac
+            if [[ "$st" == "RED" ]]; then
+                (( cat_red_counts[c]++ ))
+                (( total_red++ ))
+                cat_items_6+=("$line")
+                cat_issues_6+=("$ITEM_ISSUE")
+                cat_findings_6+=("$ITEM_FINDINGS")
+                cat_recs_6+=("$ITEM_RECOMMENDATION")
+            fi
+        done
+    done
+    if (( ${#cat_items_6[@]} == 0 )); then
+        cat_items_6+=("No Critical Issues|GREEN|No RED findings were detected during this audit.|")
+        cat_issues_6+=("")
+        cat_findings_6+=("All server components and configurations passed verification.")
+        cat_recs_6+=("All systems and configurations checked are operating normally.")
+    fi
+    cat_red_counts[6]=$total_red
+    cat_red_counts[7]=0
+    cat_red_counts[8]=0
+
+    # Pre-load logs into memory once
+    local -a findings_lines=() summary_lines=()
+    if [[ -f "$FINDINGS_FILE" ]]; then
+        mapfile -t findings_lines < "$FINDINGS_FILE"
+    else
+        findings_lines=("Findings log not found at $FINDINGS_FILE")
+    fi
+    if [[ -f "$SUMMARY_FILE" ]]; then
+        mapfile -t summary_lines < "$SUMMARY_FILE"
+    else
+        summary_lines=("Summary file not found at $SUMMARY_FILE")
+    fi
+
+    local cur_cat=0
+    local cur_item=0
+    local pane_focus=0
+    local log_scroll=0
+    local item_scroll=0
+    local status_msg=""
+    local show_help=0
+    local in_drilldown=0
+    local drill_scroll=0
+    local max_drill_scroll=0
+
+    local term_lines=25 term_cols=80
+    get_term_size() {
+        if $use_fd3; then
+            term_lines=$(tput lines <&3 2>/dev/null || echo "${LINES:-25}")
+            term_cols=$(tput cols <&3 2>/dev/null || echo "${COLUMNS:-80}")
+        else
+            term_lines=${LINES:-25}
+            term_cols=${COLUMNS:-80}
+        fi
+        (( term_lines < 15 )) && term_lines=15
+        (( term_cols < 60 )) && term_cols=60
+    }
+    get_term_size
+    trap 'get_term_size; render_tui' WINCH
+
+    render_tui() {
+        local left_w=28
+        local div_col=$(( left_w + 1 ))
+        local right_col=$(( div_col + 2 ))
+        local right_w=$(( term_cols - right_col + 1 ))
+        local body_h=$(( term_lines - 3 ))
+
+        local -n cur_items_ref="cat_items_${cur_cat}"
+        local -n cur_issues_ref="cat_issues_${cur_cat}"
+        local -n cur_findings_ref="cat_findings_${cur_cat}"
+        local -n cur_recs_ref="cat_recs_${cur_cat}"
+
+        # Clamp cur_item
+        if (( cur_cat <= 6 )); then
+            local count=${#cur_items_ref[@]}
+            if (( count > 0 )); then
+                (( cur_item >= count )) && cur_item=$(( count - 1 ))
+                (( cur_item < 0 )) && cur_item=0
+            fi
+        fi
+
+        # Keep item list height compact so remaining lines display rich findings and details
+        local cat_count=${#cur_items_ref[@]}
+        local item_list_h=8
+        (( item_list_h > cat_count )) && item_list_h=$cat_count
+        (( item_list_h < 4 )) && item_list_h=4
+        (( item_list_h > (body_h / 2) )) && item_list_h=$(( body_h / 2 ))
+
+        # Scroll item list if needed
+        if (( cur_item >= item_scroll + item_list_h )); then
+            item_scroll=$(( cur_item - item_list_h + 1 ))
+        elif (( cur_item < item_scroll )); then
+            item_scroll=$cur_item
+        fi
+
+        # Pre-parse findings and recommendation lines for current item
+        local -a f_lines=() rec_lines=()
+        if (( cur_cat <= 6 && ${#cur_items_ref[@]} > 0 )); then
+            local raw_f="${cur_findings_ref[cur_item]}"
+            raw_f="${raw_f//$'\r'/}"
+            raw_f="${raw_f//\\n/$'\n'}"
+            if [[ -n "$raw_f" ]]; then
+                local tmp_f=()
+                mapfile -t tmp_f <<< "$raw_f"
+                for line in "${tmp_f[@]}"; do
+                    [[ -n "$line" ]] && f_lines+=("$line")
+                done
+            fi
+            local raw_r="${cur_recs_ref[cur_item]}"
+            raw_r="${raw_r//$'\r'/}"
+            raw_r="${raw_r//\\n/$'\n'}"
+            if [[ -n "$raw_r" ]]; then
+                local tmp_r=()
+                mapfile -t tmp_r <<< "$raw_r"
+                for line in "${tmp_r[@]}"; do
+                    [[ -n "$line" ]] && rec_lines+=("$line")
+                done
+            fi
+        fi
+
+        local buf=""
+        buf+=$'\033[H'
+
+        # Line 1: Header
+        local health_tag=""
+        if [[ "$OVERALL_HEALTH" == *"Healthy"* ]]; then
+            health_tag="${C_GREEN}● HEALTHY${C_RESET}"
+        else
+            health_tag="${C_RED}▲ NEEDS ATTENTION${C_RESET}"
+        fi
+        buf+="${BG_HEADER}$(tui_fit_str " BOBCARES SERVER AUDIT (GoAccess TUI) | Host: $HOSTNAME" $(( term_cols - 20 )) ) Health: ${health_tag}${C_RESET}"$'\033[K\n'
+
+        # Line 2: Sub-header
+        local sub_txt=" IP: ${MAIN_IP:-N/A} | OS: ${DISTRO_NAME:-Linux} | Load: ${LOAD:-0} | RAM: ${RAM_PCT:-0}% | Disk: ${DISK_PCT:-0}%"
+        buf+="${BG_SUBHDR}$(tui_fit_str "$sub_txt" "$term_cols")${C_RESET}"$'\033[K\n'
+
+        # Body Rows (lines 3 to 3+body_h-1)
+        local r screen_row
+        for (( r=0; r<body_h; r++ )); do
+            screen_row=$(( r + 3 ))
+
+            # Left Pane content
+            local left_txt=""
+            if (( r == 0 )); then
+                left_txt="${C_BOLD}${C_CYAN} AUDIT CATEGORIES${C_RESET}"
+            elif (( r == 1 )); then
+                left_txt="${C_DARKGREY}$(tui_repeat_char '─' "$left_w")${C_RESET}"
+            elif (( r >= 2 && r <= 10 )); then
+                local c_idx=$(( r - 2 ))
+                local c_name="${cat_names[c_idx]}"
+                local c_num=$(( c_idx + 1 ))
+                local c_badge=""
+                if (( c_idx <= 5 )); then
+                    if (( cat_red_counts[c_idx] == 0 )); then
+                        c_badge="${C_GREEN}(✓)${C_RESET}"
+                    else
+                        c_badge="${C_RED}(${cat_red_counts[c_idx]})${C_RESET}"
+                    fi
+                elif (( c_idx == 6 )); then
+                    c_badge="${C_RED}($total_red)${C_RESET}"
+                elif (( c_idx == 7 )); then
+                    c_badge="${C_CYAN}(LOG)${C_RESET}"
+                else
+                    c_badge="${C_CYAN}(MD)${C_RESET}"
+                fi
+
+                local label_w=$(( left_w - 9 ))
+                local short_label
+                short_label=$(tui_fit_str "[$c_num] $c_name" "$label_w")
+                if (( c_idx == cur_cat )); then
+                    if (( pane_focus == 0 )); then
+                        left_txt="${BG_ACTIVE}▶ ${short_label}${C_RESET} ${c_badge}"
+                    else
+                        left_txt="${BG_INACTIVE_SEL}• ${short_label}${C_RESET} ${c_badge}"
+                    fi
+                else
+                    left_txt="  ${short_label} ${c_badge}"
+                fi
+            elif (( r == 11 )); then
+                left_txt="${C_DARKGREY}$(tui_repeat_char '─' "$left_w")${C_RESET}"
+            elif (( r == 12 )); then
+                if (( total_red > 0 )); then
+                    left_txt="  ${C_RED}${C_BOLD}RED Issues: $total_red${C_RESET}"
+                else
+                    left_txt="  ${C_GREEN}No RED Issues!${C_RESET}"
+                fi
+            elif (( r == 13 )); then
+                left_txt="  ${C_GREY}Tab: Switch Focus${C_RESET}"
+            fi
+
+            # Right Pane content
+            local right_txt=""
+            if (( cur_cat <= 6 )); then
+                if (( r == 0 )); then
+                    local cat_title="${cat_names[cur_cat]}"
+                    right_txt="${C_BOLD}${C_CYAN} CATEGORY: ${cat_title} (${#cur_items_ref[@]} items)${C_RESET}"
+                elif (( r == 1 )); then
+                    right_txt="${C_DARKGREY}$(tui_repeat_char '─' "$right_w")${C_RESET}"
+                elif (( r >= 2 && r < item_list_h + 2 )); then
+                    local it_idx=$(( item_scroll + r - 2 ))
+                    if (( it_idx < ${#cur_items_ref[@]} )); then
+                        local it_entry="${cur_items_ref[it_idx]}"
+                        local it_label it_st it_det it_key
+                        IFS='|' read -r it_label it_st it_det it_key <<< "$it_entry"
+                        local bge
+                        bge=$(tui_badge "$it_st")
+                        local lbl_w=24
+                        (( lbl_w > right_w / 3 )) && lbl_w=$(( right_w / 3 ))
+                        local lbl_fit
+                        lbl_fit=$(tui_fit_str "$it_label" "$lbl_w")
+                        local det_w=$(( right_w - lbl_w - 14 ))
+                        local det_fit
+                        det_fit=$(tui_fit_str "$it_det" "$det_w")
+                        if (( it_idx == cur_item )); then
+                            if (( pane_focus == 1 )); then
+                                right_txt="${BG_ACTIVE}▶ ${lbl_fit}${C_RESET} ${bge} ${det_fit}"
+                            else
+                                right_txt="${BG_INACTIVE_SEL}• ${lbl_fit}${C_RESET} ${bge} ${det_fit}"
+                            fi
+                        else
+                            right_txt="  ${lbl_fit} ${bge} ${det_fit}"
+                        fi
+                    fi
+                elif (( r == item_list_h + 2 )); then
+                    right_txt="${C_DARKGREY}── [ DETAILS & RECOMMENDATIONS ] (Press ENTER to Drill Down) $(tui_repeat_char '─' $(( right_w - 61 )))${C_RESET}"
+                elif (( r == item_list_h + 3 )); then
+                    if (( ${#cur_items_ref[@]} > 0 )); then
+                        local sel_entry="${cur_items_ref[cur_item]}"
+                        local sel_label sel_st sel_det sel_key
+                        IFS='|' read -r sel_label sel_st sel_det sel_key <<< "$sel_entry"
+                        right_txt="${C_BOLD}Item:${C_RESET} ${C_CYAN}${sel_label}${C_RESET}  ${C_BOLD}Status:${C_RESET} $(tui_badge "$sel_st")  ${C_BOLD}Summary:${C_RESET} $(tui_fit_str "$sel_det" $(( right_w - 45 )))"
+                    fi
+                elif (( r == item_list_h + 4 )); then
+                    local issue_str="${cur_issues_ref[cur_item]}"
+                    if [[ -n "$issue_str" ]]; then
+                        right_txt="${C_RED}${C_BOLD}Issue:${C_RESET} $(tui_fit_str "$issue_str" $(( right_w - 8 )))"
+                    else
+                        right_txt="${C_GREEN}${C_BOLD}Issue:${C_RESET} None. Component is operating optimally."
+                    fi
+                elif (( r == item_list_h + 5 )); then
+                    if (( ${#rec_lines[@]} > 0 )); then
+                        right_txt="${C_GREEN}${C_BOLD}Recommendation:${C_RESET} $(tui_fit_str "${rec_lines[0]}" $(( right_w - 17 )))"
+                    else
+                        right_txt="${C_GREEN}${C_BOLD}Recommendation:${C_RESET} Status is optimal. No action required."
+                    fi
+                elif (( r >= item_list_h + 6 )); then
+                    local has_rec_extra=0
+                    if (( ${#rec_lines[@]} > 1 )) || (( ${#rec_lines[@]} > 0 && ${#rec_lines[0]} > right_w - 17 )); then
+                        has_rec_extra=1
+                    fi
+
+                    local find_hdr_r=$(( item_list_h + 6 ))
+                    if (( has_rec_extra == 1 )); then
+                        if (( r == item_list_h + 6 )); then
+                            if (( ${#rec_lines[@]} > 1 )); then
+                                right_txt="  ${C_CYAN}$(tui_fit_str "${rec_lines[1]}" $(( right_w - 4 )))${C_RESET}"
+                            else
+                                right_txt="  ${C_CYAN}$(tui_fit_str "${rec_lines[0]:$(( right_w - 17 ))}" $(( right_w - 4 )))${C_RESET}"
+                            fi
+                        fi
+                        find_hdr_r=$(( item_list_h + 7 ))
+                    fi
+
+                    if (( r == find_hdr_r )); then
+                        if (( ${#f_lines[@]} > 0 )); then
+                            right_txt="${C_YELLOW}${C_BOLD}Findings & Details (${#f_lines[@]} entries):${C_RESET}"
+                        else
+                            right_txt="${C_GREY}Findings & Details: Verified normal.${C_RESET}"
+                        fi
+                    elif (( r > find_hdr_r )); then
+                        local f_idx=$(( r - (find_hdr_r + 1) ))
+                        if (( r == body_h - 1 && f_idx < ${#f_lines[@]} - 1 )); then
+                            right_txt="  ${C_CYAN}... and $(( ${#f_lines[@]} - f_idx )) more entries [Press ENTER for full list in Drill-Down]${C_RESET}"
+                        elif (( f_idx < ${#f_lines[@]} )); then
+                            right_txt="  ${C_WHITE}• $(tui_fit_str "${f_lines[f_idx]}" $(( right_w - 5 )))${C_RESET}"
+                        fi
+                    fi
+                fi
+            else
+                local log_name="" log_count=0
+                local -n active_log_ref
+                if (( cur_cat == 7 )); then
+                    log_name="audit-findings.log"
+                    active_log_ref="findings_lines"
+                else
+                    log_name="audit-smart-summary.md"
+                    active_log_ref="summary_lines"
+                fi
+                log_count=${#active_log_ref[@]}
+
+                if (( r == 0 )); then
+                    right_txt="${C_BOLD}${C_CYAN} FILE: $log_name (Line $(( log_scroll + 1 )) of $log_count)  [↑/↓: Scroll, PgUp/PgDn]${C_RESET}"
+                elif (( r == 1 )); then
+                    right_txt="${C_DARKGREY}$(tui_repeat_char '─' "$right_w")${C_RESET}"
+                else
+                    local l_idx=$(( log_scroll + r - 2 ))
+                    if (( l_idx < log_count )); then
+                        right_txt="$(tui_fit_str "${active_log_ref[l_idx]}" "$right_w")"
+                    fi
+                fi
+            fi
+
+            buf+=$'\033['"${screen_row};1H${left_txt}"
+            buf+=$'\033['"${screen_row};${div_col}H${C_DARKGREY}│${C_RESET}"
+            buf+=$'\033['"${screen_row};${right_col}H${right_txt}"$'\033[K'
+        done
+
+        # Footer row
+        local footer_txt
+        if [[ -n "$status_msg" ]]; then
+            footer_txt=" $status_msg "
+        else
+            footer_txt=" [↑/↓] Nav  [TAB] Switch Pane  [1-9] Jump  [ENTER] Drill-down / View All  [s] Save  [?] Help  [q] Quit "
+        fi
+        buf+=$'\033['"${term_lines};1H${BG_FOOTER}$(tui_fit_str "$footer_txt" "$term_cols")${C_RESET}"$'\033[K'
+
+        # Render Drill-Down Modal if active
+        if (( in_drilldown == 1 && cur_cat <= 6 )); then
+            local mw=$(( term_cols - 6 ))
+            (( mw > 115 )) && mw=115
+            (( mw < 60 )) && mw=60
+            local mh=$(( term_lines - 4 ))
+            (( mh < 14 )) && mh=14
+            local mx=$(( (term_cols - mw) / 2 ))
+            local my=$(( (term_lines - mh) / 2 ))
+
+            local it_entry="${cur_items_ref[cur_item]}"
+            local it_label it_st it_det it_key
+            IFS='|' read -r it_label it_st it_det it_key <<< "$it_entry"
+            local it_issue="${cur_issues_ref[cur_item]}"
+            local it_badge
+            it_badge=$(tui_badge "$it_st")
+
+            local fit_lbl
+            fit_lbl=$(tui_fit_str "$it_label" 25)
+            local top_title="┌─ [ DRILL-DOWN: ${fit_lbl} ] "
+            local top_pad=$(( mw - 1 - ${#top_title} ))
+            (( top_pad < 0 )) && top_pad=0
+            local box_top="${top_title}$(tui_repeat_char '─' "$top_pad")┐"
+            local box_div="├$(tui_repeat_char '─' $(( mw - 2 )))┤"
+            local box_bot="└$(tui_repeat_char '─' $(( mw - 2 )))┘"
+
+            buf+=$'\033['"${my};${mx}H${BG_ACTIVE}${box_top}${C_RESET}"
+            
+            # Row 1: Category & Status
+            local r1=" Category: ${cat_names[cur_cat]}    Status: ${it_badge}    Summary: $it_det"
+            buf+=$'\033['"$(( my + 1 ));${mx}H${BG_ACTIVE}│$(tui_fit_str "$r1" $(( mw - 2 )))│${C_RESET}"
+
+            # Row 2: Issue Description
+            local r2=" Issue: ${it_issue:-Optimal. No critical issues detected.}"
+            buf+=$'\033['"$(( my + 2 ));${mx}H${BG_ACTIVE}│$(tui_fit_str "$r2" $(( mw - 2 )))│${C_RESET}"
+
+            # Scrollable Findings Area
+            local findings_area_h=$(( mh - 8 ))
+            (( findings_area_h < 4 )) && findings_area_h=4
+            max_drill_scroll=$(( ${#f_lines[@]} - findings_area_h ))
+            (( max_drill_scroll < 0 )) && max_drill_scroll=0
+            (( drill_scroll > max_drill_scroll )) && drill_scroll=$max_drill_scroll
+            (( drill_scroll < 0 )) && drill_scroll=0
+
+            # Row 3: Section Divider
+            local scroll_info=""
+            if (( ${#f_lines[@]} > findings_area_h )); then
+                local end_line=$(( drill_scroll + findings_area_h ))
+                (( end_line > ${#f_lines[@]} )) && end_line=${#f_lines[@]}
+                scroll_info=" [Showing $(( drill_scroll + 1 ))-${end_line} of ${#f_lines[@]}]"
+            fi
+            local r3_title=" ALL FINDINGS & DETAILS (${#f_lines[@]} items)${scroll_info} [↑/↓ Scroll, ESC/q Close] "
+            local div_pad=$(( mw - 3 - ${#r3_title} ))
+            (( div_pad < 0 )) && div_pad=0
+            buf+=$'\033['"$(( my + 3 ));${mx}H${BG_ACTIVE}├─${r3_title}$(tui_repeat_char '─' "$div_pad")┤${C_RESET}"
+
+            local fi screen_fi
+            for (( fi=0; fi<findings_area_h; fi++ )); do
+                screen_fi=$(( my + 4 + fi ))
+                local line_idx=$(( drill_scroll + fi ))
+                local fl_txt=""
+                if (( line_idx < ${#f_lines[@]} )); then
+                    local num_prefix
+                    printf -v num_prefix "%2d. " "$(( line_idx + 1 ))"
+                    fl_txt=" ${num_prefix}${f_lines[line_idx]}"
+                elif (( ${#f_lines[@]} == 0 && fi == 0 )); then
+                    fl_txt=" No specific finding items reported. Component is verified."
+                fi
+                buf+=$'\033['"${screen_fi};${mx}H${BG_ACTIVE}│$(tui_fit_str "$fl_txt" $(( mw - 2 )))│${C_RESET}"
+            done
+
+            # Recommendation Divider & Section
+            local rec_y=$(( my + 4 + findings_area_h ))
+            buf+=$'\033['"${rec_y};${mx}H${BG_ACTIVE}${box_div}${C_RESET}"
+            
+            local rec_txt=" Recommendation: ${rec_lines[0]:-Status optimal. No action required.}"
+            buf+=$'\033['"$(( rec_y + 1 ));${mx}H${BG_ACTIVE}│$(tui_fit_str "$rec_txt" $(( mw - 2 )))│${C_RESET}"
+            local rec_txt2=""
+            if (( ${#rec_lines[@]} > 1 )); then
+                rec_txt2=" ${rec_lines[1]}"
+            elif (( ${#rec_lines[@]} > 0 && ${#rec_lines[0]} > mw - 20 )); then
+                rec_txt2=" ${rec_lines[0]:$(( mw - 20 ))}"
+            fi
+            buf+=$'\033['"$(( rec_y + 2 ));${mx}H${BG_ACTIVE}│$(tui_fit_str "$rec_txt2" $(( mw - 2 )))│${C_RESET}"
+
+            # Fill any remaining rows up to my + mh - 1 with solid background
+            local fill_y
+            for (( fill_y = rec_y + 3; fill_y < my + mh; fill_y++ )); do
+                buf+=$'\033['"${fill_y};${mx}H${BG_ACTIVE}│$(tui_repeat_char ' ' $(( mw - 2 )))│${C_RESET}"
+            done
+
+            # Footer of Modal
+            buf+=$'\033['"$(( my + mh ));${mx}H${BG_ACTIVE}${box_bot}${C_RESET}"
+        fi
+
+        # Render Help Overlay if requested
+        if (( show_help == 1 )); then
+            local hw=58 hh=14
+            local hx=$(( (term_cols - hw) / 2 ))
+            local hy=$(( (term_lines - hh) / 2 ))
+            local box_top="┌$(tui_repeat_char '─' $(( hw - 2 )))┐"
+            local box_bot="└$(tui_repeat_char '─' $(( hw - 2 )))┘"
+
+            buf+=$'\033['"${hy};${hx}H${BG_ACTIVE}${box_top}${C_RESET}"
+            local help_lines=(
+                "  BOBCARES AUDIT TUI - QUICK HELP"
+                "────────────────────────────────────────────────────────"
+                "  ↑ / k , ↓ / j   : Move selection up / down"
+                "  Tab             : Toggle focus between Panes"
+                "  ← / h , → / l   : Switch pane"
+                "  Enter / d       : Drill-down / View full details"
+                "  1 - 9           : Direct jump to category 1 to 9"
+                "  PgUp / PgDn     : Scroll logs or drill-down (10 lines)"
+                "  s / S           : Show report export locations"
+                "  ?               : Toggle this help overlay"
+                "  q / Q / ESC     : Exit TUI or close modal"
+                "────────────────────────────────────────────────────────"
+                "               Press any key to dismiss"
+            )
+            local hl_idx
+            for (( hl_idx=0; hl_idx<${#help_lines[@]}; hl_idx++ )); do
+                local cur_hy=$(( hy + hl_idx + 1 ))
+                local line_str="${help_lines[hl_idx]}"
+                buf+=$'\033['"${cur_hy};${hx}H${BG_ACTIVE}│$(tui_fit_str "$line_str" $(( hw - 2 )))│${C_RESET}"
+            done
+            buf+=$'\033['"$(( hy + hh ));${hx}H${BG_ACTIVE}${box_bot}${C_RESET}"
+        fi
+
+        if $use_fd3; then
+            printf '%s' "$buf" >&3
+        else
+            printf '%s' "$buf"
+        fi
+    }
+
+    render_tui
+
+    # Interactive input loop with exact escape-sequence handling
+    local ESC
+    printf -v ESC '\033'
+
+    if $use_fd3; then
+        while true; do
+            status_msg=""
+            local key="" seq="" seq2=""
+            IFS= read -rsn1 key <&3 || break
+
+            if [[ "$key" == "$ESC" ]]; then
+                read -rsn2 -t 0.1 seq <&3 2>/dev/null
+                key+="$seq"
+                if [[ "$seq" =~ ^\[[0-9]$ ]]; then
+                    read -rsn1 -t 0.1 seq2 <&3 2>/dev/null
+                    key+="$seq2"
+                fi
+            fi
+
+
+            if (( show_help == 1 )); then
+                show_help=0
+                render_tui
+                continue
+            fi
+
+            # Handle Drill-down modal interactions
+            if (( in_drilldown == 1 )); then
+                case "$key" in
+                    q|Q|"$ESC"|""|$'\n'|$'\r'|d|D|" "|x|X)
+                        in_drilldown=0
+                        while IFS= read -rsn1 -t 0.05 _discard <&3 2>/dev/null; do :; done
+                        ;;
+                    "${ESC}[A"|"${ESC}OA"|"${ESC}[1;2A"|k|K) # UP
+                        (( drill_scroll > 0 )) && (( drill_scroll-- ))
+                        ;;
+                    "${ESC}[B"|"${ESC}OB"|"${ESC}[1;2B"|j|J) # DOWN
+                        (( drill_scroll < max_drill_scroll )) && (( drill_scroll++ ))
+                        ;;
+                    "${ESC}[5~"|"${ESC}[5;2~") # PgUp
+                        (( drill_scroll >= 10 )) && (( drill_scroll -= 10 )) || drill_scroll=0
+                        ;;
+                    "${ESC}[6~"|"${ESC}[6;2~") # PgDn
+                        (( drill_scroll + 10 <= max_drill_scroll )) && (( drill_scroll += 10 )) || drill_scroll=$max_drill_scroll
+                        ;;
+                    "${ESC}[1~"|"${ESC}[7~"|"${ESC}[H"|"${ESC}OH") # Home
+                        drill_scroll=0
+                        ;;
+                    "${ESC}[4~"|"${ESC}[8~"|"${ESC}[F"|"${ESC}OF") # End
+                        drill_scroll=$max_drill_scroll
+                        ;;
+                esac
+                render_tui
+                continue
+            fi
+
+            case "$key" in
+                q|Q|"$ESC")
+                    break
+                    ;;
+                "?"|H)
+                    show_help=1
+                    ;;
+                h)
+                    if (( pane_focus == 1 )); then
+                        pane_focus=0
+                    else
+                        show_help=1
+                    fi
+                    ;;
+                $'\t')
+                    pane_focus=$(( 1 - pane_focus ))
+                    ;;
+                "${ESC}[A"|"${ESC}OA"|"${ESC}[1;2A"|"${ESC}[1;5A"|k|K) # UP
+                    if (( pane_focus == 0 )); then
+                        if (( cur_cat > 0 )); then
+                            (( cur_cat-- ))
+                            cur_item=0
+                            log_scroll=0
+                            item_scroll=0
+                        fi
+                    else
+                        if (( cur_cat <= 6 )); then
+                            (( cur_item > 0 )) && (( cur_item-- ))
+                        else
+                            (( log_scroll > 0 )) && (( log_scroll-- ))
+                        fi
+                    fi
+                    ;;
+                "${ESC}[B"|"${ESC}OB"|"${ESC}[1;2B"|"${ESC}[1;5B"|j|J) # DOWN
+                    if (( pane_focus == 0 )); then
+                        if (( cur_cat < 8 )); then
+                            (( cur_cat++ ))
+                            cur_item=0
+                            log_scroll=0
+                            item_scroll=0
+                        fi
+                    else
+                        if (( cur_cat <= 6 )); then
+                            local -n cur_arr="cat_items_${cur_cat}"
+                            local max_it=${#cur_arr[@]}
+                            (( cur_item < max_it - 1 )) && (( cur_item++ ))
+                        else
+                            local -n cur_log_arr
+                            (( cur_cat == 7 )) && cur_log_arr="findings_lines" || cur_log_arr="summary_lines"
+                            local max_scroll=$(( ${#cur_log_arr[@]} - 5 ))
+                            (( max_scroll < 0 )) && max_scroll=0
+                            (( log_scroll < max_scroll )) && (( log_scroll++ ))
+                        fi
+                    fi
+                    ;;
+                "${ESC}[D"|"${ESC}OD") # LEFT
+                    pane_focus=0
+                    ;;
+                "${ESC}[C"|"${ESC}OC"|l|L) # RIGHT
+                    pane_focus=1
+                    ;;
+                ""|$'\n'|$'\r'|d|D) # ENTER or d: Drill-down modal
+                    if (( cur_cat <= 6 )); then
+                        in_drilldown=1
+                        drill_scroll=0
+                        while IFS= read -rsn1 -t 0.05 _discard <&3 2>/dev/null; do :; done
+                    else
+                        pane_focus=1
+                    fi
+                    ;;
+                "${ESC}[5~"|"${ESC}[5;2~") # PgUp
+                    if (( pane_focus == 0 )); then
+                        cur_cat=0
+                        cur_item=0
+                    elif (( cur_cat <= 6 )); then
+                        (( cur_item >= 5 )) && (( cur_item -= 5 )) || cur_item=0
+                    else
+                        (( log_scroll >= 10 )) && (( log_scroll -= 10 )) || log_scroll=0
+                    fi
+                    ;;
+                "${ESC}[6~"|"${ESC}[6;2~") # PgDn
+                    if (( pane_focus == 0 )); then
+                        cur_cat=8
+                        cur_item=0
+                    elif (( cur_cat <= 6 )); then
+                        local -n cur_arr_pg="cat_items_${cur_cat}"
+                        local max_it=${#cur_arr_pg[@]}
+                        (( cur_item + 5 < max_it )) && (( cur_item += 5 )) || cur_item=$(( max_it - 1 ))
+                    else
+                        (( log_scroll += 10 ))
+                    fi
+                    ;;
+                "${ESC}[1~"|"${ESC}[7~"|"${ESC}[H"|"${ESC}OH") # Home
+                    if (( pane_focus == 0 )); then
+                        cur_cat=0
+                    else
+                        cur_item=0
+                        log_scroll=0
+                    fi
+                    ;;
+                "${ESC}[4~"|"${ESC}[8~"|"${ESC}[F"|"${ESC}OF") # End
+                    if (( pane_focus == 0 )); then
+                        cur_cat=8
+                    else
+                        local -n cur_arr_end="cat_items_${cur_cat}"
+                        local max_it=${#cur_arr_end[@]}
+                        (( max_it > 0 )) && cur_item=$(( max_it - 1 ))
+                    fi
+                    ;;
+                1|2|3|4|5|6|7|8|9)
+                    if [[ ${#key} -eq 1 ]]; then
+                        cur_cat=$(( key - 1 ))
+                        cur_item=0
+                        log_scroll=0
+                        item_scroll=0
+                    fi
+                    ;;
+                s|S)
+                    status_msg="[Saved] Reports ready in /root/scripts/ (Markdown, Findings, Recommendations, Detailed)"
+                    ;;
+            esac
+            render_tui
+        done
+    fi
+}
+
+#-------------------------------------------------------------------------------
 # Main
 #-------------------------------------------------------------------------------
 
 main() {
     [[ $EUID -ne 0 ]] && echo "[WARN] Not running as root - several checks will be incomplete."
+
+    if [[ "$VIEW_ONLY" == "true" ]]; then
+        load_all_state >/dev/null 2>&1 || true
+        collect_os_details >/dev/null 2>&1 || true
+        collect_system_info >/dev/null 2>&1 || true
+        check_resource_usage >/dev/null 2>&1 || true
+        if [[ -z "$OTHER_UPDATE_COUNT" || "$OTHER_UPDATE_COUNT" -eq 0 ]] && [[ ! -f "$FINDINGS_FILE" ]]; then
+            check_package_updates >/dev/null 2>&1 || true
+        fi
+        run_audit_tui
+        return 0
+    fi
 
     SECURITY_ACTIONS=""
     export SECURITY_ACTIONS
@@ -2621,7 +3815,20 @@ main() {
     echo "[ACTION]  If no malware scanner is configured, install one"
     echo "          and perform a full malware scan."
     echo
-    echo "========================================================="
+    if [[ "$NO_TUI" != "true" ]]; then
+        if [[ "$LAUNCH_TUI" == "true" ]]; then
+            run_audit_tui
+        elif [ -t 0 ] || [ -c /dev/tty ]; then
+            echo
+            printf "\033[1;36m[TUI]\033[0m Launch GoAccess-style interactive dashboard? [Y/n] (Auto-launch in 5s): "
+            local ans=""
+            read -t 5 -r -n 1 ans < /dev/tty 2>/dev/null || ans="y"
+            echo
+            if [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]]; then
+                run_audit_tui
+            fi
+        fi
+    fi
 }
 
 main "$@"
