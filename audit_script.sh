@@ -3109,6 +3109,7 @@ run_audit_tui() {
     local pane_focus=0
     local log_scroll=0
     local item_scroll=0
+    local bot_scroll=0
     local status_msg=""
     local show_help=0
     local in_drilldown=0
@@ -3440,58 +3441,65 @@ run_audit_tui() {
         # Clear ALL bottom rows first (prevents stale content when switching items)
         local bot_start=$(( top_h + 3 ))   # screen row of first bottom line
         local bot_end=$(( body_h + 2 ))    # screen row of last bottom line
+        local avail_bot=$(( bot_end - bot_start + 1 ))
+        local total_blines=${#_blines[@]}
+        local max_bot_scroll=$(( total_blines - avail_bot ))
+        (( max_bot_scroll < 0 )) && max_bot_scroll=0
+        (( bot_scroll > max_bot_scroll )) && bot_scroll=$max_bot_scroll
+        (( bot_scroll < 0 )) && bot_scroll=0
+
         local bot_r
         for (( bot_r=bot_start; bot_r<=bot_end; bot_r++ )); do
             buf+=$'\033['"${bot_r};1H"$'\033[2K'
         done
 
-        # Position cursor at first bottom row and render _blines document-style.
-        # For normal (non-wrap) entries: use absolute positioning + ?7l clip.
-        # For autowrap entries (full sentences): enable ?7h, print full text,
-        #   then re-disable ?7l and skip the rows the text consumed.
+        # Render _blines starting from bot_scroll offset
         buf+=$'\033['"${bot_start};1H"
         local cur_screen_row=$bot_start
         local bi
-        for (( bi=0; bi<${#_blines[@]}; bi++ )); do
-            # Stop if we've used up all available bottom rows
-            (( cur_screen_row > bot_end )) && break
+        for (( bi=bot_scroll; bi<total_blines; bi++ )); do
+            # Reserve last row for overflow hint if needed
+            local rows_left=$(( bot_end - cur_screen_row + 1 ))
+            local items_left=$(( total_blines - bi ))
+            if (( cur_screen_row == bot_end && items_left > 1 )); then
+                buf+=$'\033['"${cur_screen_row};1H"$'\033[2K'
+                buf+="  ${C_CYAN}↓ ${items_left} more entries below  [PgDn to scroll, ENTER for full view]${C_RESET}"
+                break
+            fi
 
             local entry="${_blines[bi]}"
             local do_wrap=${_blines_wrap[bi]}
 
             if (( do_wrap == 1 )); then
-                # Print full sentence with autowrap on — terminal tracks it as
-                # one logical line, so triple-click selects the whole sentence.
-                # Calculate how many screen rows it will consume (for cursor tracking).
-                # Strip ANSI to count visible chars:
-                local vis_len=${#entry}    # entry is raw text, no ANSI codes
+                local vis_len=${#entry}
                 local rows_used=$(( (vis_len + term_cols - 1) / term_cols ))
                 (( rows_used < 1 )) && rows_used=1
 
-                # Clamp: don't spill into footer
                 local rows_avail=$(( bot_end - cur_screen_row + 1 ))
+                # Reserve last row for overflow hint if more entries follow
+                (( bi + 1 < total_blines )) && (( rows_avail-- ))
+                if (( rows_avail <= 0 )); then
+                    buf+=$'\033['"${cur_screen_row};1H"$'\033[2K'
+                    buf+="  ${C_CYAN}↓ $(( total_blines - bi )) more entries below  [PgDn to scroll, ENTER for full view]${C_RESET}"
+                    break
+                fi
                 if (( rows_used > rows_avail )); then
                     rows_used=$rows_avail
-                    # Truncate entry to what fits
                     local max_chars=$(( rows_avail * term_cols ))
                     entry="${entry:0:$max_chars}"
                 fi
 
                 buf+=$'\033[?7h'"${entry}"$'\033[?7l'
-                # After autowrap, cursor is at column (vis_len % term_cols) + 1
-                # on row (cur_screen_row + rows_used - 1).
-                # Move to start of next row:
                 cur_screen_row=$(( cur_screen_row + rows_used ))
                 (( cur_screen_row <= bot_end )) && buf+=$'\033['"${cur_screen_row};1H"
             else
-                # Normal single-row entry (header, divider, findings bullet)
                 buf+=$'\033['"${cur_screen_row};1H"$'\033[2K'"${entry}"
                 (( cur_screen_row++ ))
                 (( cur_screen_row <= bot_end )) && buf+=$'\033['"${cur_screen_row};1H"
             fi
         done
 
-        # Ensure remaining bottom rows are blank
+        # Blank remaining rows
         while (( cur_screen_row <= bot_end )); do
             buf+=$'\033['"${cur_screen_row};1H"$'\033[2K'
             (( cur_screen_row++ ))
@@ -3511,7 +3519,7 @@ run_audit_tui() {
             if (( cur_cat >= 7 )); then
                 footer_txt=" [↑/↓/PgUp/PgDn] Scroll Log  [TAB/←] Categories  [s] Save  [?] Help  [q] Quit "
             else
-                footer_txt=" [↑/↓] Browse Items  [ENTER] Drill-down  [TAB/←] Categories  [s] Save  [?] Help  [q] Quit "
+                footer_txt=" [↑/↓] Browse Items  [PgDn/PgUp] Scroll Findings  [ENTER] Drill-down  [TAB/←] Categories  [s] Save  [?] Help  [q] Quit "
             fi
         fi
         buf+=$'\033['"${term_lines};1H${BG_FOOTER}$(tui_fit_str "$footer_txt" "$term_cols")${C_RESET}"$'\033[K'
@@ -3871,12 +3879,14 @@ run_audit_tui() {
                             cur_item=0
                             log_scroll=0
                             item_scroll=0
+                            bot_scroll=0
                         fi
                     elif (( cur_cat >= 7 )); then
                         local step=$(( wheel_ticks * 3 ))
                         (( log_scroll >= step )) && (( log_scroll -= step )) || log_scroll=0
                     else
                         (( cur_item >= wheel_ticks )) && (( cur_item -= wheel_ticks )) || cur_item=0
+                        bot_scroll=0
                     fi
                     ;;
                 WHEEL_DOWN) # Mouse Wheel Down
@@ -3886,6 +3896,7 @@ run_audit_tui() {
                             cur_item=0
                             log_scroll=0
                             item_scroll=0
+                            bot_scroll=0
                         fi
                     elif (( cur_cat >= 7 )); then
                         local -n cur_log_arr
@@ -3899,6 +3910,7 @@ run_audit_tui() {
                         local max_it=${#cur_arr[@]}
                         (( cur_item + wheel_ticks < max_it )) && (( cur_item += wheel_ticks )) || cur_item=$(( max_it - 1 ))
                         (( cur_item < 0 )) && cur_item=0
+                        bot_scroll=0
                     fi
                     ;;
                 "${ESC}[A"|"${ESC}OA"|"${ESC}[1;2A"|"${ESC}[1;5A"|k|K) # UP
@@ -3908,12 +3920,18 @@ run_audit_tui() {
                             cur_item=0
                             log_scroll=0
                             item_scroll=0
+                            bot_scroll=0
                         fi
                     elif (( cur_cat >= 7 )); then
                         local step=$(( arrow_ticks * 3 ))
                         (( log_scroll >= step )) && (( log_scroll -= step )) || log_scroll=0
                     else
-                        (( cur_item >= arrow_ticks )) && (( cur_item -= arrow_ticks )) || cur_item=0
+                        if (( cur_item >= arrow_ticks )); then
+                            (( cur_item -= arrow_ticks ))
+                        else
+                            cur_item=0
+                        fi
+                        bot_scroll=0
                     fi
                     ;;
                 "${ESC}[B"|"${ESC}OB"|"${ESC}[1;2B"|"${ESC}[1;5B"|j|J) # DOWN
@@ -3923,6 +3941,7 @@ run_audit_tui() {
                             cur_item=0
                             log_scroll=0
                             item_scroll=0
+                            bot_scroll=0
                         fi
                     elif (( cur_cat >= 7 )); then
                         local -n cur_log_arr
@@ -3936,6 +3955,7 @@ run_audit_tui() {
                         local max_it=${#cur_arr[@]}
                         (( cur_item + arrow_ticks < max_it )) && (( cur_item += arrow_ticks )) || cur_item=$(( max_it - 1 ))
                         (( cur_item < 0 )) && cur_item=0
+                        bot_scroll=0
                     fi
                     ;;
                 "${ESC}[D"|"${ESC}OD") # LEFT
@@ -3965,8 +3985,10 @@ run_audit_tui() {
                     if (( pane_focus == 0 )); then
                         cur_cat=0
                         cur_item=0
+                        bot_scroll=0
                     elif (( cur_cat <= 6 )); then
-                        (( cur_item >= 5 )) && (( cur_item -= 5 )) || cur_item=0
+                        # Scroll bot pane findings up
+                        (( bot_scroll >= 5 )) && (( bot_scroll -= 5 )) || bot_scroll=0
                     else
                         (( log_scroll >= 10 )) && (( log_scroll -= 10 )) || log_scroll=0
                     fi
@@ -3975,10 +3997,13 @@ run_audit_tui() {
                     if (( pane_focus == 0 )); then
                         cur_cat=8
                         cur_item=0
+                        bot_scroll=0
                     elif (( cur_cat <= 6 )); then
+                        # Scroll bot pane findings down
                         local -n cur_arr_pg="cat_items_${cur_cat}"
-                        local max_it=${#cur_arr_pg[@]}
-                        (( cur_item + 5 < max_it )) && (( cur_item += 5 )) || cur_item=$(( max_it - 1 ))
+                        local max_bot_pg=$(( ${#_blines[@]} - 1 ))
+                        (( max_bot_pg < 0 )) && max_bot_pg=0
+                        (( bot_scroll + 5 <= max_bot_pg )) && (( bot_scroll += 5 )) || bot_scroll=$max_bot_pg
                     else
                         local -n cur_log_arr_pg
                         (( cur_cat == 7 )) && cur_log_arr_pg="findings_lines" || cur_log_arr_pg="summary_lines"
