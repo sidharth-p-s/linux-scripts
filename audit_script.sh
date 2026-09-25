@@ -2964,6 +2964,9 @@ tui_get_item_details() {
     if [[ "$st" == "RED" ]]; then
         [[ -z "$ITEM_ISSUE" ]] && ITEM_ISSUE="Issue detected: $label ($det)"
         [[ -z "$ITEM_RECOMMENDATION" ]] && ITEM_RECOMMENDATION="Investigate and remediate $label to restore normal system operations."
+    else
+        ITEM_ISSUE=""
+        ITEM_RECOMMENDATION=""
     fi
 }
 
@@ -3016,7 +3019,7 @@ run_audit_tui() {
 
     tui_cleanup() {
         if $use_fd3; then
-            printf '\033[?25h\033[?1049l' >&3 2>/dev/null
+            printf '\033[?25h\033[?7h\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1007h\033[?1049l' >&3 2>/dev/null
             [[ -n "$old_stty" ]] && stty "$old_stty" <&3 2>/dev/null
             exec 3>&- 3<&- 2>/dev/null
         fi
@@ -3025,7 +3028,9 @@ run_audit_tui() {
     trap 'tui_cleanup' EXIT
 
     if $use_fd3; then
-        printf '\033[?1049h\033[?25l' >&3
+        # Enter alternate screen, hide cursor, disable line wrap (?7l), enable alternate screen mouse wheel translation (?1007h)
+        # Keep click reporting OFF (?1000l ?1002l ?1003l ?1006l) so clicks and text selection stay native
+        printf '\033[?1049h\033[?25l\033[?7l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1007h' >&3
     fi
 
     local cat_names=(
@@ -3126,10 +3131,15 @@ run_audit_tui() {
     trap 'get_term_size; render_tui' WINCH
 
     render_tui() {
-        local left_w=28
+        local left_w=34
+        if (( term_cols < 76 )); then
+            left_w=$(( term_cols * 40 / 100 ))
+            (( left_w < 26 )) && left_w=26
+        fi
         local div_col=$(( left_w + 1 ))
         local right_col=$(( div_col + 2 ))
         local right_w=$(( term_cols - right_col + 1 ))
+        (( right_w < 10 )) && right_w=10
         local body_h=$(( term_lines - 3 ))
 
         local -n cur_items_ref="cat_items_${cur_cat}"
@@ -3146,16 +3156,26 @@ run_audit_tui() {
             fi
         fi
 
-        # Keep item list height compact so remaining lines display rich findings and details
-        local cat_count=${#cur_items_ref[@]}
-        local item_list_h=8
-        (( item_list_h > cat_count )) && item_list_h=$cat_count
-        (( item_list_h < 4 )) && item_list_h=4
-        (( item_list_h > (body_h / 2) )) && item_list_h=$(( body_h / 2 ))
+        # Height partition between Top (Dual Pane) and Bottom (Full Width Details)
+        local top_h=13
+        if (( cur_cat <= 6 )); then
+            if (( body_h >= 20 )); then
+                top_h=13
+            elif (( body_h >= 16 )); then
+                top_h=12
+            else
+                top_h=$(( body_h * 6 / 10 ))
+                (( top_h < 8 )) && top_h=8
+            fi
+        else
+            top_h=$body_h
+        fi
 
-        # Scroll item list if needed
-        if (( cur_item >= item_scroll + item_list_h )); then
-            item_scroll=$(( cur_item - item_list_h + 1 ))
+        # Scroll item list in the top pane if needed
+        local item_visible_h=$(( top_h - 2 ))
+        (( item_visible_h < 2 )) && item_visible_h=2
+        if (( cur_item >= item_scroll + item_visible_h )); then
+            item_scroll=$(( cur_item - item_visible_h + 1 ))
         elif (( cur_item < item_scroll )); then
             item_scroll=$cur_item
         fi
@@ -3206,178 +3226,275 @@ run_audit_tui() {
         for (( r=0; r<body_h; r++ )); do
             screen_row=$(( r + 3 ))
 
-            # Left Pane content
-            local left_txt=""
-            if (( r == 0 )); then
-                left_txt="${C_BOLD}${C_CYAN} AUDIT CATEGORIES${C_RESET}"
-            elif (( r == 1 )); then
-                left_txt="${C_DARKGREY}$(tui_repeat_char '─' "$left_w")${C_RESET}"
-            elif (( r >= 2 && r <= 10 )); then
-                local c_idx=$(( r - 2 ))
-                local c_name="${cat_names[c_idx]}"
-                local c_num=$(( c_idx + 1 ))
-                local c_badge=""
-                if (( c_idx <= 5 )); then
-                    if (( cat_red_counts[c_idx] == 0 )); then
-                        c_badge="${C_GREEN}(✓)${C_RESET}"
-                    else
-                        c_badge="${C_RED}(${cat_red_counts[c_idx]})${C_RESET}"
-                    fi
-                elif (( c_idx == 6 )); then
-                    c_badge="${C_RED}($total_red)${C_RESET}"
-                elif (( c_idx == 7 )); then
-                    c_badge="${C_CYAN}(LOG)${C_RESET}"
-                else
-                    c_badge="${C_CYAN}(MD)${C_RESET}"
-                fi
-
-                local label_w=$(( left_w - 9 ))
-                local short_label
-                short_label=$(tui_fit_str "[$c_num] $c_name" "$label_w")
-                if (( c_idx == cur_cat )); then
-                    if (( pane_focus == 0 )); then
-                        left_txt="${BG_ACTIVE}▶ ${short_label}${C_RESET} ${c_badge}"
-                    else
-                        left_txt="${BG_INACTIVE_SEL}• ${short_label}${C_RESET} ${c_badge}"
-                    fi
-                else
-                    left_txt="  ${short_label} ${c_badge}"
-                fi
-            elif (( r == 11 )); then
-                left_txt="${C_DARKGREY}$(tui_repeat_char '─' "$left_w")${C_RESET}"
-            elif (( r == 12 )); then
-                if (( total_red > 0 )); then
-                    left_txt="  ${C_RED}${C_BOLD}RED Issues: $total_red${C_RESET}"
-                else
-                    left_txt="  ${C_GREEN}No RED Issues!${C_RESET}"
-                fi
-            elif (( r == 13 )); then
-                left_txt="  ${C_GREY}Tab: Switch Focus${C_RESET}"
-            fi
-
-            # Right Pane content
-            local right_txt=""
-            if (( cur_cat <= 6 )); then
+            if (( r < top_h )); then
+                # Left Pane content
+                local left_txt=""
                 if (( r == 0 )); then
-                    local cat_title="${cat_names[cur_cat]}"
-                    right_txt="${C_BOLD}${C_CYAN} CATEGORY: ${cat_title} (${#cur_items_ref[@]} items)${C_RESET}"
+                    left_txt="${C_BOLD}${C_CYAN} AUDIT CATEGORIES${C_RESET}"
                 elif (( r == 1 )); then
-                    right_txt="${C_DARKGREY}$(tui_repeat_char '─' "$right_w")${C_RESET}"
-                elif (( r >= 2 && r < item_list_h + 2 )); then
-                    local it_idx=$(( item_scroll + r - 2 ))
-                    if (( it_idx < ${#cur_items_ref[@]} )); then
-                        local it_entry="${cur_items_ref[it_idx]}"
-                        local it_label it_st it_det it_key
-                        IFS='|' read -r it_label it_st it_det it_key <<< "$it_entry"
-                        local bge
-                        bge=$(tui_badge "$it_st")
-                        local lbl_w=24
-                        (( lbl_w > right_w / 3 )) && lbl_w=$(( right_w / 3 ))
-                        local lbl_fit
-                        lbl_fit=$(tui_fit_str "$it_label" "$lbl_w")
-                        local det_w=$(( right_w - lbl_w - 14 ))
-                        local det_fit
-                        det_fit=$(tui_fit_str "$it_det" "$det_w")
-                        if (( it_idx == cur_item )); then
-                            if (( pane_focus == 1 )); then
-                                right_txt="${BG_ACTIVE}▶ ${lbl_fit}${C_RESET} ${bge} ${det_fit}"
-                            else
-                                right_txt="${BG_INACTIVE_SEL}• ${lbl_fit}${C_RESET} ${bge} ${det_fit}"
-                            fi
+                    left_txt="${C_DARKGREY}$(tui_repeat_char '─' "$left_w")${C_RESET}"
+                elif (( r >= 2 && r <= 10 )); then
+                    local c_idx=$(( r - 2 ))
+                    local c_name="${cat_names[c_idx]}"
+                    local c_num=$(( c_idx + 1 ))
+                    local c_badge=""
+                    if (( c_idx <= 5 )); then
+                        if (( cat_red_counts[c_idx] == 0 )); then
+                            c_badge="${C_GREEN}(✓)${C_RESET}"
                         else
-                            right_txt="  ${lbl_fit} ${bge} ${det_fit}"
+                            c_badge="${C_RED}(${cat_red_counts[c_idx]})${C_RESET}"
                         fi
-                    fi
-                elif (( r == item_list_h + 2 )); then
-                    right_txt="${C_DARKGREY}── [ DETAILS & RECOMMENDATIONS ] (Press ENTER to Drill Down) $(tui_repeat_char '─' $(( right_w - 61 )))${C_RESET}"
-                elif (( r == item_list_h + 3 )); then
-                    if (( ${#cur_items_ref[@]} > 0 )); then
-                        local sel_entry="${cur_items_ref[cur_item]}"
-                        local sel_label sel_st sel_det sel_key
-                        IFS='|' read -r sel_label sel_st sel_det sel_key <<< "$sel_entry"
-                        right_txt="${C_BOLD}Item:${C_RESET} ${C_CYAN}${sel_label}${C_RESET}  ${C_BOLD}Status:${C_RESET} $(tui_badge "$sel_st")  ${C_BOLD}Summary:${C_RESET} $(tui_fit_str "$sel_det" $(( right_w - 45 )))"
-                    fi
-                elif (( r == item_list_h + 4 )); then
-                    local issue_str="${cur_issues_ref[cur_item]}"
-                    if [[ -n "$issue_str" ]]; then
-                        right_txt="${C_RED}${C_BOLD}Issue:${C_RESET} $(tui_fit_str "$issue_str" $(( right_w - 8 )))"
+                    elif (( c_idx == 6 )); then
+                        c_badge="${C_RED}($total_red)${C_RESET}"
+                    elif (( c_idx == 7 )); then
+                        c_badge="${C_CYAN}(LOG)${C_RESET}"
                     else
-                        right_txt="${C_GREEN}${C_BOLD}Issue:${C_RESET} None. Component is operating optimally."
-                    fi
-                elif (( r == item_list_h + 5 )); then
-                    if (( ${#rec_lines[@]} > 0 )); then
-                        right_txt="${C_GREEN}${C_BOLD}Recommendation:${C_RESET} $(tui_fit_str "${rec_lines[0]}" $(( right_w - 17 )))"
-                    else
-                        right_txt="${C_GREEN}${C_BOLD}Recommendation:${C_RESET} Status is optimal. No action required."
-                    fi
-                elif (( r >= item_list_h + 6 )); then
-                    local has_rec_extra=0
-                    if (( ${#rec_lines[@]} > 1 )) || (( ${#rec_lines[@]} > 0 && ${#rec_lines[0]} > right_w - 17 )); then
-                        has_rec_extra=1
+                        c_badge="${C_CYAN}(MD)${C_RESET}"
                     fi
 
-                    local find_hdr_r=$(( item_list_h + 6 ))
-                    if (( has_rec_extra == 1 )); then
-                        if (( r == item_list_h + 6 )); then
-                            if (( ${#rec_lines[@]} > 1 )); then
-                                right_txt="  ${C_CYAN}$(tui_fit_str "${rec_lines[1]}" $(( right_w - 4 )))${C_RESET}"
+                    local label_w=$(( left_w - 9 ))
+                    local full_cat="[$c_num] $c_name"
+                    local padded_label
+                    if (( ${#full_cat} <= label_w )); then
+                        printf -v padded_label "%-${label_w}s" "$full_cat"
+                    else
+                        padded_label=$(tui_fit_str "$full_cat" "$label_w")
+                    fi
+                    if (( c_idx == cur_cat )); then
+                        if (( pane_focus == 0 )); then
+                            left_txt="${BG_ACTIVE}▶ ${padded_label}${C_RESET} ${c_badge}"
+                        else
+                            left_txt="${BG_INACTIVE_SEL}• ${padded_label}${C_RESET} ${c_badge}"
+                        fi
+                    else
+                        left_txt="  ${padded_label} ${c_badge}"
+                    fi
+                elif (( r == 11 )); then
+                    left_txt="${C_DARKGREY}$(tui_repeat_char '─' "$left_w")${C_RESET}"
+                elif (( r == 12 )); then
+                    if (( total_red > 0 )); then
+                        left_txt="  ${C_RED}${C_BOLD}RED Issues: $total_red${C_RESET}"
+                    else
+                        left_txt="  ${C_GREEN}No RED Issues!${C_RESET}"
+                    fi
+                elif (( r == 13 )); then
+                    left_txt="  ${C_GREY}Tab: Switch Focus${C_RESET}"
+                fi
+
+                # Right Pane content
+                local right_txt=""
+                if (( cur_cat <= 6 )); then
+                    if (( r == 0 )); then
+                        local cat_title="${cat_names[cur_cat]}"
+                        local cat_hdr=" CATEGORY: ${cat_title} (${#cur_items_ref[@]} items)"
+                        right_txt="${C_BOLD}${C_CYAN}$(tui_fit_str "$cat_hdr" "$right_w")${C_RESET}"
+                    elif (( r == 1 )); then
+                        right_txt="${C_DARKGREY}$(tui_repeat_char '─' "$right_w")${C_RESET}"
+                    elif (( r >= 2 )); then
+                        local it_idx=$(( item_scroll + r - 2 ))
+                        if (( it_idx < ${#cur_items_ref[@]} )); then
+                            local it_entry="${cur_items_ref[it_idx]}"
+                            local it_label it_st it_det it_key
+                            IFS='|' read -r it_label it_st it_det it_key <<< "$it_entry"
+                            local bge
+                            bge=$(tui_badge "$it_st")
+                            local lbl_w=24
+                            (( lbl_w > right_w / 3 )) && lbl_w=$(( right_w / 3 ))
+                            local lbl_fit
+                            lbl_fit=$(tui_fit_str "$it_label" "$lbl_w")
+                            local det_w=$(( right_w - lbl_w - 14 ))
+                            local det_fit
+                            det_fit=$(tui_fit_str "$it_det" "$det_w")
+                            if (( it_idx == cur_item )); then
+                                if (( pane_focus == 1 )); then
+                                    right_txt="${BG_ACTIVE}▶ ${lbl_fit}${C_RESET} ${bge} ${det_fit}"
+                                else
+                                    right_txt="${BG_INACTIVE_SEL}• ${lbl_fit}${C_RESET} ${bge} ${det_fit}"
+                                fi
                             else
-                                right_txt="  ${C_CYAN}$(tui_fit_str "${rec_lines[0]:$(( right_w - 17 ))}" $(( right_w - 4 )))${C_RESET}"
+                                right_txt="  ${lbl_fit} ${bge} ${det_fit}"
                             fi
                         fi
-                        find_hdr_r=$(( item_list_h + 7 ))
                     fi
+                else
+                    local log_name="" log_count=0
+                    local -n active_log_ref
+                    if (( cur_cat == 7 )); then
+                        log_name="audit-findings.log"
+                        active_log_ref="findings_lines"
+                    else
+                        log_name="audit-smart-summary.md"
+                        active_log_ref="summary_lines"
+                    fi
+                    log_count=${#active_log_ref[@]}
 
-                    if (( r == find_hdr_r )); then
-                        if (( ${#f_lines[@]} > 0 )); then
-                            right_txt="${C_YELLOW}${C_BOLD}Findings & Details (${#f_lines[@]} entries):${C_RESET}"
-                        else
-                            right_txt="${C_GREY}Findings & Details: Verified normal.${C_RESET}"
+                    if (( r == 0 )); then
+                        local fl_hdr=" FILE: $log_name ($log_count lines)"
+                        if (( right_w > 48 )); then
+                            fl_hdr=" FILE: $log_name (Line $(( log_scroll + 1 )) of $log_count)  [↑/↓: Scroll, PgUp/PgDn]"
                         fi
-                    elif (( r > find_hdr_r )); then
-                        local f_idx=$(( r - (find_hdr_r + 1) ))
-                        if (( r == body_h - 1 && f_idx < ${#f_lines[@]} - 1 )); then
-                            right_txt="  ${C_CYAN}... and $(( ${#f_lines[@]} - f_idx )) more entries [Press ENTER for full list in Drill-Down]${C_RESET}"
-                        elif (( f_idx < ${#f_lines[@]} )); then
-                            right_txt="  ${C_WHITE}• $(tui_fit_str "${f_lines[f_idx]}" $(( right_w - 5 )))${C_RESET}"
+                        right_txt="${C_BOLD}${C_CYAN}$(tui_fit_str "$fl_hdr" "$right_w")${C_RESET}"
+                    elif (( r == 1 )); then
+                        right_txt="${C_DARKGREY}$(tui_repeat_char '─' "$right_w")${C_RESET}"
+                    else
+                        local l_idx=$(( log_scroll + r - 2 ))
+                        if (( l_idx < log_count )); then
+                            right_txt="$(tui_fit_str "${active_log_ref[l_idx]}" "$right_w")"
                         fi
                     fi
                 fi
+
+                buf+=$'\033['"${screen_row};1H"$'\033[2K'"${left_txt}"
+                buf+=$'\033['"${screen_row};${div_col}H${C_DARKGREY}│${C_RESET}"
+                buf+=$'\033['"${screen_row};${right_col}H${right_txt}"
             else
-                local log_name="" log_count=0
-                local -n active_log_ref
-                if (( cur_cat == 7 )); then
-                    log_name="audit-findings.log"
-                    active_log_ref="findings_lines"
-                else
-                    log_name="audit-smart-summary.md"
-                    active_log_ref="summary_lines"
+                # Bottom Section: FULL-WIDTH Details & Recommendations / Findings
+                # Pre-compute bot_lines array ONCE per render (done at bot_r==0)
+                local bot_r=$(( r - top_h ))
+                local sel_label="" sel_st="" sel_det="" sel_key=""
+                if (( ${#cur_items_ref[@]} > 0 )); then
+                    IFS='|' read -r sel_label sel_st sel_det sel_key <<< "${cur_items_ref[cur_item]}"
                 fi
-                log_count=${#active_log_ref[@]}
 
-                if (( r == 0 )); then
-                    right_txt="${C_BOLD}${C_CYAN} FILE: $log_name (Line $(( log_scroll + 1 )) of $log_count)  [↑/↓: Scroll, PgUp/PgDn]${C_RESET}"
-                elif (( r == 1 )); then
-                    right_txt="${C_DARKGREY}$(tui_repeat_char '─' "$right_w")${C_RESET}"
-                else
-                    local l_idx=$(( log_scroll + r - 2 ))
-                    if (( l_idx < log_count )); then
-                        right_txt="$(tui_fit_str "${active_log_ref[l_idx]}" "$right_w")"
+                local is_red_item=0
+                [[ "$sel_st" == "RED" ]] && is_red_item=1
+
+                # Build bot_lines array once (at bot_r==0 for this render pass)
+                # We use a file-scoped local that persists within the render_tui call.
+                # Since bash functions share locals within the same call stack, we
+                # use a naming convention: _blines_built to track if array is ready.
+                if (( bot_r == 0 )); then
+                    _blines=()
+                    _blines_built=1
+
+                    # Row 0: separator
+                    local div_title
+                    if (( is_red_item == 1 )); then
+                        div_title="── [ DETAILS & RECOMMENDATIONS ] (Press ENTER to Drill Down) "
+                    else
+                        div_title="── [ DETAILS & FINDINGS ] (Press ENTER to Drill Down) "
+                    fi
+                    local pad_len=$(( term_cols - ${#div_title} ))
+                    (( pad_len < 0 )) && pad_len=0
+                    _blines+=("${C_DARKGREY}${div_title}$(tui_repeat_char '─' "$pad_len")${C_RESET}")
+
+                    # Row 1: item summary
+                    if [[ -n "$sel_label" ]]; then
+                        _blines+=("${C_BOLD}Item:${C_RESET} ${C_CYAN}${sel_label}${C_RESET}   ${C_BOLD}Status:${C_RESET} $(tui_badge "$sel_st")   ${C_BOLD}Summary:${C_RESET} $(tui_fit_str "$sel_det" $(( term_cols - 45 )))")
+                    else
+                        _blines+=("")
+                    fi
+
+                    if (( is_red_item == 1 )); then
+                        # Issue section
+                        local issue_raw="${cur_issues_ref[cur_item]}"
+                        issue_raw="${issue_raw//$'\r'/}"
+                        issue_raw="${issue_raw//$'\n'/ }"
+                        issue_raw="${issue_raw//\\n/ }"
+                        # Trim leading/trailing spaces
+                        issue_raw="${issue_raw#"${issue_raw%%[! ]*}"}"
+                        issue_raw="${issue_raw%"${issue_raw##*[! ]}"}"
+
+                        local rec_raw="${cur_recs_ref[cur_item]}"
+                        rec_raw="${rec_raw//$'\r'/}"
+                        rec_raw="${rec_raw//$'\n'/ }"
+                        rec_raw="${rec_raw//\\n/ }"
+                        rec_raw="${rec_raw#"${rec_raw%%[! ]*}"}"
+                        rec_raw="${rec_raw%"${rec_raw##*[! ]}"}"
+                        [[ -z "$rec_raw" ]] && rec_raw="Investigate and remediate $sel_label to restore normal system operations."
+
+                        # Issue header + wrapped text
+                        _blines+=("${C_RED}${C_BOLD}Issue:${C_RESET}")
+                        # Word-wrap issue text to term_cols
+                        local remaining="$issue_raw"
+                        while [[ ${#remaining} -gt $term_cols ]]; do
+                            # Find last space within term_cols
+                            local chunk="${remaining:0:$term_cols}"
+                            local cut_at=$term_cols
+                            # Try to break at last space
+                            local sp_pos=${chunk% *}
+                            if [[ "$sp_pos" != "$chunk" ]] && (( ${#sp_pos} > 0 )); then
+                                cut_at=${#sp_pos}
+                            fi
+                            _blines+=("${remaining:0:$cut_at}")
+                            remaining="${remaining:$cut_at}"
+                            remaining="${remaining#" "}"  # strip leading space
+                        done
+                        [[ -n "$remaining" ]] && _blines+=("$remaining")
+
+                        # Recommendation header + wrapped text
+                        _blines+=("${C_GREEN}${C_BOLD}Recommendation:${C_RESET}")
+                        remaining="$rec_raw"
+                        while [[ ${#remaining} -gt $term_cols ]]; do
+                            local chunk="${remaining:0:$term_cols}"
+                            local cut_at=$term_cols
+                            local sp_pos=${chunk% *}
+                            if [[ "$sp_pos" != "$chunk" ]] && (( ${#sp_pos} > 0 )); then
+                                cut_at=${#sp_pos}
+                            fi
+                            _blines+=("${remaining:0:$cut_at}")
+                            remaining="${remaining:$cut_at}"
+                            remaining="${remaining#" "}"
+                        done
+                        [[ -n "$remaining" ]] && _blines+=("$remaining")
+
+                        # Findings header
+                        if (( ${#f_lines[@]} > 0 )); then
+                            _blines+=("${C_YELLOW}${C_BOLD}Findings & Details (${#f_lines[@]} entries):${C_RESET}")
+                            local fi
+                            for (( fi=0; fi<${#f_lines[@]}; fi++ )); do
+                                _blines+=("  ${C_WHITE}• $(tui_fit_str "${f_lines[fi]}" $(( term_cols - 5 )))${C_RESET}")
+                            done
+                        else
+                            _blines+=("${C_GREY}Findings & Details: Verified normal.${C_RESET}")
+                        fi
+                    else
+                        # GREEN/OK item: show Findings directly
+                        if (( ${#f_lines[@]} > 0 )); then
+                            _blines+=("${C_YELLOW}${C_BOLD}Findings & Details (${#f_lines[@]} entries):${C_RESET}")
+                            local fi
+                            for (( fi=0; fi<${#f_lines[@]}; fi++ )); do
+                                _blines+=("  ${C_WHITE}• $(tui_fit_str "${f_lines[fi]}" $(( term_cols - 5 )))${C_RESET}")
+                            done
+                        else
+                            _blines+=("${C_GREY}Findings & Details: Verified normal.${C_RESET}")
+                        fi
                     fi
                 fi
-            fi
 
-            buf+=$'\033['"${screen_row};1H${left_txt}"
-            buf+=$'\033['"${screen_row};${div_col}H${C_DARKGREY}│${C_RESET}"
-            buf+=$'\033['"${screen_row};${right_col}H${right_txt}"$'\033[K'
+                # Render from bot_lines array
+                local bot_txt=""
+                local total_bot=${#_blines[@]}
+                local avail_bot=$(( body_h - top_h ))
+
+                # Show truncation hint on last row if more content exists
+                if (( bot_r < total_bot )); then
+                    bot_txt="${_blines[bot_r]}"
+                    if (( bot_r == avail_bot - 1 && total_bot > avail_bot )); then
+                        bot_txt="  ${C_CYAN}... and $(( total_bot - bot_r )) more entries [Press ENTER for full list in Drill-Down]${C_RESET}"
+                    fi
+                fi
+
+                buf+=$'\033['"${screen_row};1H"$'\033[2K'"${bot_txt}"
+            fi
         done
 
         # Footer row
         local footer_txt
         if [[ -n "$status_msg" ]]; then
             footer_txt=" $status_msg "
+        elif (( pane_focus == 0 )); then
+            if (( cur_cat >= 7 )); then
+                footer_txt=" [↑/↓] Browse Categories  [ENTER/→] View Log  [1-9] Jump  [s] Save  [?] Help  [q] Quit "
+            else
+                footer_txt=" [↑/↓] Browse Categories  [ENTER/TAB] Open Category  [1-9] Jump  [s] Save  [?] Help  [q] Quit "
+            fi
         else
-            footer_txt=" [↑/↓] Nav  [TAB] Switch Pane  [1-9] Jump  [ENTER] Drill-down / View All  [s] Save  [?] Help  [q] Quit "
+            if (( cur_cat >= 7 )); then
+                footer_txt=" [↑/↓/PgUp/PgDn] Scroll Log  [TAB/←] Categories  [s] Save  [?] Help  [q] Quit "
+            else
+                footer_txt=" [↑/↓] Browse Items  [ENTER] Drill-down  [TAB/←] Categories  [s] Save  [?] Help  [q] Quit "
+            fi
         fi
         buf+=$'\033['"${term_lines};1H${BG_FOOTER}$(tui_fit_str "$footer_txt" "$term_cols")${C_RESET}"$'\033[K'
 
@@ -3413,64 +3530,107 @@ run_audit_tui() {
             local r1=" Category: ${cat_names[cur_cat]}    Status: ${it_badge}    Summary: $it_det"
             buf+=$'\033['"$(( my + 1 ));${mx}H${BG_ACTIVE}│$(tui_fit_str "$r1" $(( mw - 2 )))│${C_RESET}"
 
-            # Row 2: Issue Description
-            local r2=" Issue: ${it_issue:-Optimal. No critical issues detected.}"
-            buf+=$'\033['"$(( my + 2 ));${mx}H${BG_ACTIVE}│$(tui_fit_str "$r2" $(( mw - 2 )))│${C_RESET}"
+            if [[ "$it_st" == "RED" ]]; then
+                # Row 2: Issue Description
+                local r2=" Issue: ${it_issue}"
+                buf+=$'\033['"$(( my + 2 ));${mx}H${BG_ACTIVE}│$(tui_fit_str "$r2" $(( mw - 2 )))│${C_RESET}"
 
-            # Scrollable Findings Area
-            local findings_area_h=$(( mh - 8 ))
-            (( findings_area_h < 4 )) && findings_area_h=4
-            max_drill_scroll=$(( ${#f_lines[@]} - findings_area_h ))
-            (( max_drill_scroll < 0 )) && max_drill_scroll=0
-            (( drill_scroll > max_drill_scroll )) && drill_scroll=$max_drill_scroll
-            (( drill_scroll < 0 )) && drill_scroll=0
+                # Scrollable Findings Area
+                local findings_area_h=$(( mh - 8 ))
+                (( findings_area_h < 4 )) && findings_area_h=4
+                max_drill_scroll=$(( ${#f_lines[@]} - findings_area_h ))
+                (( max_drill_scroll < 0 )) && max_drill_scroll=0
+                (( drill_scroll > max_drill_scroll )) && drill_scroll=$max_drill_scroll
+                (( drill_scroll < 0 )) && drill_scroll=0
 
-            # Row 3: Section Divider
-            local scroll_info=""
-            if (( ${#f_lines[@]} > findings_area_h )); then
-                local end_line=$(( drill_scroll + findings_area_h ))
-                (( end_line > ${#f_lines[@]} )) && end_line=${#f_lines[@]}
-                scroll_info=" [Showing $(( drill_scroll + 1 ))-${end_line} of ${#f_lines[@]}]"
-            fi
-            local r3_title=" ALL FINDINGS & DETAILS (${#f_lines[@]} items)${scroll_info} [↑/↓ Scroll, ESC/q Close] "
-            local div_pad=$(( mw - 3 - ${#r3_title} ))
-            (( div_pad < 0 )) && div_pad=0
-            buf+=$'\033['"$(( my + 3 ));${mx}H${BG_ACTIVE}├─${r3_title}$(tui_repeat_char '─' "$div_pad")┤${C_RESET}"
-
-            local fi screen_fi
-            for (( fi=0; fi<findings_area_h; fi++ )); do
-                screen_fi=$(( my + 4 + fi ))
-                local line_idx=$(( drill_scroll + fi ))
-                local fl_txt=""
-                if (( line_idx < ${#f_lines[@]} )); then
-                    local num_prefix
-                    printf -v num_prefix "%2d. " "$(( line_idx + 1 ))"
-                    fl_txt=" ${num_prefix}${f_lines[line_idx]}"
-                elif (( ${#f_lines[@]} == 0 && fi == 0 )); then
-                    fl_txt=" No specific finding items reported. Component is verified."
+                # Row 3: Section Divider
+                local scroll_info=""
+                if (( ${#f_lines[@]} > findings_area_h )); then
+                    local end_line=$(( drill_scroll + findings_area_h ))
+                    (( end_line > ${#f_lines[@]} )) && end_line=${#f_lines[@]}
+                    scroll_info=" [Showing $(( drill_scroll + 1 ))-${end_line} of ${#f_lines[@]}]"
                 fi
-                buf+=$'\033['"${screen_fi};${mx}H${BG_ACTIVE}│$(tui_fit_str "$fl_txt" $(( mw - 2 )))│${C_RESET}"
-            done
+                local r3_title=" ALL FINDINGS & DETAILS (${#f_lines[@]} items)${scroll_info} [↑/↓ Scroll, ESC/q Close] "
+                local div_pad=$(( mw - 3 - ${#r3_title} ))
+                (( div_pad < 0 )) && div_pad=0
+                buf+=$'\033['"$(( my + 3 ));${mx}H${BG_ACTIVE}├─${r3_title}$(tui_repeat_char '─' "$div_pad")┤${C_RESET}"
 
-            # Recommendation Divider & Section
-            local rec_y=$(( my + 4 + findings_area_h ))
-            buf+=$'\033['"${rec_y};${mx}H${BG_ACTIVE}${box_div}${C_RESET}"
-            
-            local rec_txt=" Recommendation: ${rec_lines[0]:-Status optimal. No action required.}"
-            buf+=$'\033['"$(( rec_y + 1 ));${mx}H${BG_ACTIVE}│$(tui_fit_str "$rec_txt" $(( mw - 2 )))│${C_RESET}"
-            local rec_txt2=""
-            if (( ${#rec_lines[@]} > 1 )); then
-                rec_txt2=" ${rec_lines[1]}"
-            elif (( ${#rec_lines[@]} > 0 && ${#rec_lines[0]} > mw - 20 )); then
-                rec_txt2=" ${rec_lines[0]:$(( mw - 20 ))}"
+                local fi screen_fi
+                for (( fi=0; fi<findings_area_h; fi++ )); do
+                    screen_fi=$(( my + 4 + fi ))
+                    local line_idx=$(( drill_scroll + fi ))
+                    local fl_txt=""
+                    if (( line_idx < ${#f_lines[@]} )); then
+                        local num_prefix
+                        printf -v num_prefix "%2d. " "$(( line_idx + 1 ))"
+                        fl_txt=" ${num_prefix}${f_lines[line_idx]}"
+                    elif (( ${#f_lines[@]} == 0 && fi == 0 )); then
+                        fl_txt=" No specific finding items reported. Component is verified."
+                    fi
+                    buf+=$'\033['"${screen_fi};${mx}H${BG_ACTIVE}│$(tui_fit_str "$fl_txt" $(( mw - 2 )))│${C_RESET}"
+                done
+
+                # Recommendation Divider & Section
+                local rec_y=$(( my + 4 + findings_area_h ))
+                buf+=$'\033['"${rec_y};${mx}H${BG_ACTIVE}${box_div}${C_RESET}"
+                
+                local rec_txt=" Recommendation: ${rec_lines[0]}"
+                buf+=$'\033['"$(( rec_y + 1 ));${mx}H${BG_ACTIVE}│$(tui_fit_str "$rec_txt" $(( mw - 2 )))│${C_RESET}"
+                local rec_txt2=""
+                if (( ${#rec_lines[@]} > 1 )); then
+                    rec_txt2=" ${rec_lines[1]}"
+                elif (( ${#rec_lines[@]} > 0 && ${#rec_lines[0]} > mw - 20 )); then
+                    rec_txt2=" ${rec_lines[0]:$(( mw - 20 ))}"
+                fi
+                buf+=$'\033['"$(( rec_y + 2 ));${mx}H${BG_ACTIVE}│$(tui_fit_str "$rec_txt2" $(( mw - 2 )))│${C_RESET}"
+
+                # Fill any remaining rows up to my + mh - 1 with solid background
+                local fill_y
+                for (( fill_y = rec_y + 3; fill_y < my + mh; fill_y++ )); do
+                    buf+=$'\033['"${fill_y};${mx}H${BG_ACTIVE}│$(tui_repeat_char ' ' $(( mw - 2 )))│${C_RESET}"
+                done
+            else
+                # NON-RED ITEM: Findings area gets full height, no Issue / Recommendation
+                local findings_area_h=$(( mh - 4 ))
+                (( findings_area_h < 4 )) && findings_area_h=4
+                max_drill_scroll=$(( ${#f_lines[@]} - findings_area_h ))
+                (( max_drill_scroll < 0 )) && max_drill_scroll=0
+                (( drill_scroll > max_drill_scroll )) && drill_scroll=$max_drill_scroll
+                (( drill_scroll < 0 )) && drill_scroll=0
+
+                # Row 2: Section Divider
+                local scroll_info=""
+                if (( ${#f_lines[@]} > findings_area_h )); then
+                    local end_line=$(( drill_scroll + findings_area_h ))
+                    (( end_line > ${#f_lines[@]} )) && end_line=${#f_lines[@]}
+                    scroll_info=" [Showing $(( drill_scroll + 1 ))-${end_line} of ${#f_lines[@]}]"
+                fi
+                local r2_title=" ALL FINDINGS & DETAILS (${#f_lines[@]} items)${scroll_info} [↑/↓ Scroll, ESC/q Close] "
+                local div_pad=$(( mw - 3 - ${#r2_title} ))
+                (( div_pad < 0 )) && div_pad=0
+                buf+=$'\033['"$(( my + 2 ));${mx}H${BG_ACTIVE}├─${r2_title}$(tui_repeat_char '─' "$div_pad")┤${C_RESET}"
+
+                local fi screen_fi
+                for (( fi=0; fi<findings_area_h; fi++ )); do
+                    screen_fi=$(( my + 3 + fi ))
+                    local line_idx=$(( drill_scroll + fi ))
+                    local fl_txt=""
+                    if (( line_idx < ${#f_lines[@]} )); then
+                        local num_prefix
+                        printf -v num_prefix "%2d. " "$(( line_idx + 1 ))"
+                        fl_txt=" ${num_prefix}${f_lines[line_idx]}"
+                    elif (( ${#f_lines[@]} == 0 && fi == 0 )); then
+                        fl_txt=" No specific finding items reported. Component is verified normal."
+                    fi
+                    buf+=$'\033['"${screen_fi};${mx}H${BG_ACTIVE}│$(tui_fit_str "$fl_txt" $(( mw - 2 )))│${C_RESET}"
+                done
+
+                # Fill any remaining rows up to my + mh - 1 with solid background
+                local fill_y
+                for (( fill_y = my + 3 + findings_area_h; fill_y < my + mh; fill_y++ )); do
+                    buf+=$'\033['"${fill_y};${mx}H${BG_ACTIVE}│$(tui_repeat_char ' ' $(( mw - 2 )))│${C_RESET}"
+                done
             fi
-            buf+=$'\033['"$(( rec_y + 2 ));${mx}H${BG_ACTIVE}│$(tui_fit_str "$rec_txt2" $(( mw - 2 )))│${C_RESET}"
-
-            # Fill any remaining rows up to my + mh - 1 with solid background
-            local fill_y
-            for (( fill_y = rec_y + 3; fill_y < my + mh; fill_y++ )); do
-                buf+=$'\033['"${fill_y};${mx}H${BG_ACTIVE}│$(tui_repeat_char ' ' $(( mw - 2 )))│${C_RESET}"
-            done
 
             # Footer of Modal
             buf+=$'\033['"$(( my + mh ));${mx}H${BG_ACTIVE}${box_bot}${C_RESET}"
@@ -3526,15 +3686,100 @@ run_audit_tui() {
         while true; do
             status_msg=""
             local key="" seq="" seq2=""
+            local key="" seq="" seq2="" wheel_ticks=1
             IFS= read -rsn1 key <&3 || break
 
             if [[ "$key" == "$ESC" ]]; then
-                read -rsn2 -t 0.1 seq <&3 2>/dev/null
-                key+="$seq"
-                if [[ "$seq" =~ ^\[[0-9]$ ]]; then
-                    read -rsn1 -t 0.1 seq2 <&3 2>/dev/null
-                    key+="$seq2"
+                local c1="" c2=""
+                if read -rsn1 -t 0.05 c1 <&3 2>/dev/null; then
+                    key+="$c1"
+                    if [[ "$c1" == "[" || "$c1" == "O" ]]; then
+                        if read -rsn1 -t 0.05 c2 <&3 2>/dev/null; then
+                            key+="$c2"
+                            if [[ "$c1" == "[" && "$c2" == "<" ]]; then
+                                # SGR mouse event (\033[<btn;x;yM or m)
+                                local sgr_body="" m_term=""
+                                while read -rsn1 -t 0.05 m_term <&3 2>/dev/null; do
+                                    if [[ "$m_term" == "M" || "$m_term" == "m" ]]; then
+                                        break
+                                    fi
+                                    sgr_body+="$m_term"
+                                done
+                                local sgr_btn="${sgr_body%%;*}"
+                                if [[ "$sgr_btn" == "64" ]]; then
+                                    # Mouse Wheel UP: drain burst and set WHEEL_UP
+                                    wheel_ticks=1
+                                    while read -rsn1 -t 0.005 peek_esc <&3 2>/dev/null; do
+                                        if [[ "$peek_esc" == "$ESC" ]]; then
+                                            read -rsn8 -t 0.005 _discard <&3 2>/dev/null
+                                            (( wheel_ticks++ ))
+                                        fi
+                                        (( wheel_ticks >= 5 )) && break
+                                    done
+                                    key="WHEEL_UP"
+                                elif [[ "$sgr_btn" == "65" ]]; then
+                                    # Mouse Wheel DOWN: drain burst and set WHEEL_DOWN
+                                    wheel_ticks=1
+                                    while read -rsn1 -t 0.005 peek_esc <&3 2>/dev/null; do
+                                        if [[ "$peek_esc" == "$ESC" ]]; then
+                                            read -rsn8 -t 0.005 _discard <&3 2>/dev/null
+                                            (( wheel_ticks++ ))
+                                        fi
+                                        (( wheel_ticks >= 5 )) && break
+                                    done
+                                    key="WHEEL_DOWN"
+                                else
+                                    # Clicks, drags, and releases are ignored so selection/pointer stays native
+                                    while read -rsn1 -t 0.002 _discard <&3 2>/dev/null; do :; done
+                                    continue
+                                fi
+                            elif [[ "$c1" == "[" && "$c2" == "M" ]]; then
+                                # X10 mouse event (\033[M B x y)
+                                local m_b=""
+                                read -rsn1 -t 0.05 m_b <&3 2>/dev/null
+                                read -rsn2 -t 0.05 _discard <&3 2>/dev/null
+                                local m_code
+                                printf -v m_code "%d" "'$m_b"
+                                if (( m_code == 96 )); then
+                                    key="WHEEL_UP"
+                                    wheel_ticks=1
+                                elif (( m_code == 97 )); then
+                                    key="WHEEL_DOWN"
+                                    wheel_ticks=1
+                                else
+                                    continue
+                                fi
+                            elif [[ "$c2" =~ [0-9] ]]; then
+                                # Extended escape sequence (e.g. \033[5~, \033[1;2A)
+                                local rest=""
+                                while read -rsn1 -t 0.05 rest <&3 2>/dev/null; do
+                                    key+="$rest"
+                                    if [[ "$rest" == "M" || "$rest" == "m" ]]; then
+                                        local rx_rxvt='^'$'\033''\[[0-9]+;[0-9]+;[0-9]+[Mm]$'
+                                        if [[ "$key" =~ $rx_rxvt ]]; then
+                                            key=""
+                                            break
+                                        fi
+                                    fi
+                                    [[ "$rest" =~ [a-zA-Z~] ]] && break
+                                done
+                                if [[ -z "$key" ]]; then
+                                    while read -rsn1 -t 0.002 _discard <&3 2>/dev/null; do :; done
+                                    continue
+                                fi
+                            fi
+                        fi
+                    fi
                 fi
+            fi
+
+            # Prevent rapid arrow key bursts (e.g. from touchpad momentum or key hold) from freezing the script
+            local rx_arrow='^'$'\033''(\[[AB]|O[AB])'
+            local arrow_ticks=1
+            if [[ "$key" =~ $rx_arrow ]]; then
+                while (( arrow_ticks < 4 )) && read -rsn3 -t 0.005 _discard <&3 2>/dev/null; do
+                    (( arrow_ticks++ ))
+                done
             fi
 
 
@@ -3552,10 +3797,20 @@ run_audit_tui() {
                         while IFS= read -rsn1 -t 0.05 _discard <&3 2>/dev/null; do :; done
                         ;;
                     "${ESC}[A"|"${ESC}OA"|"${ESC}[1;2A"|k|K) # UP
-                        (( drill_scroll > 0 )) && (( drill_scroll-- ))
+                        local step=$(( arrow_ticks * 2 ))
+                        (( drill_scroll >= step )) && (( drill_scroll -= step )) || drill_scroll=0
                         ;;
                     "${ESC}[B"|"${ESC}OB"|"${ESC}[1;2B"|j|J) # DOWN
-                        (( drill_scroll < max_drill_scroll )) && (( drill_scroll++ ))
+                        local step=$(( arrow_ticks * 2 ))
+                        (( drill_scroll + step <= max_drill_scroll )) && (( drill_scroll += step )) || drill_scroll=$max_drill_scroll
+                        ;;
+                    WHEEL_UP) # Mouse wheel up
+                        local step=$(( wheel_ticks * 3 ))
+                        (( drill_scroll >= step )) && (( drill_scroll -= step )) || drill_scroll=0
+                        ;;
+                    WHEEL_DOWN) # Mouse wheel down
+                        local step=$(( wheel_ticks * 3 ))
+                        (( drill_scroll + step <= max_drill_scroll )) && (( drill_scroll += step )) || drill_scroll=$max_drill_scroll
                         ;;
                     "${ESC}[5~"|"${ESC}[5;2~") # PgUp
                         (( drill_scroll >= 10 )) && (( drill_scroll -= 10 )) || drill_scroll=0
@@ -3591,6 +3846,43 @@ run_audit_tui() {
                 $'\t')
                     pane_focus=$(( 1 - pane_focus ))
                     ;;
+                WHEEL_UP) # Mouse Wheel Up
+                    if (( pane_focus == 0 )); then
+                        if (( cur_cat > 0 )); then
+                            (( cur_cat-- ))
+                            cur_item=0
+                            log_scroll=0
+                            item_scroll=0
+                        fi
+                    elif (( cur_cat >= 7 )); then
+                        local step=$(( wheel_ticks * 3 ))
+                        (( log_scroll >= step )) && (( log_scroll -= step )) || log_scroll=0
+                    else
+                        (( cur_item >= wheel_ticks )) && (( cur_item -= wheel_ticks )) || cur_item=0
+                    fi
+                    ;;
+                WHEEL_DOWN) # Mouse Wheel Down
+                    if (( pane_focus == 0 )); then
+                        if (( cur_cat < 8 )); then
+                            (( cur_cat++ ))
+                            cur_item=0
+                            log_scroll=0
+                            item_scroll=0
+                        fi
+                    elif (( cur_cat >= 7 )); then
+                        local -n cur_log_arr
+                        (( cur_cat == 7 )) && cur_log_arr="findings_lines" || cur_log_arr="summary_lines"
+                        local max_scroll=$(( ${#cur_log_arr[@]} - 5 ))
+                        (( max_scroll < 0 )) && max_scroll=0
+                        local step=$(( wheel_ticks * 3 ))
+                        (( log_scroll + step <= max_scroll )) && (( log_scroll += step )) || log_scroll=$max_scroll
+                    else
+                        local -n cur_arr="cat_items_${cur_cat}"
+                        local max_it=${#cur_arr[@]}
+                        (( cur_item + wheel_ticks < max_it )) && (( cur_item += wheel_ticks )) || cur_item=$(( max_it - 1 ))
+                        (( cur_item < 0 )) && cur_item=0
+                    fi
+                    ;;
                 "${ESC}[A"|"${ESC}OA"|"${ESC}[1;2A"|"${ESC}[1;5A"|k|K) # UP
                     if (( pane_focus == 0 )); then
                         if (( cur_cat > 0 )); then
@@ -3599,12 +3891,11 @@ run_audit_tui() {
                             log_scroll=0
                             item_scroll=0
                         fi
+                    elif (( cur_cat >= 7 )); then
+                        local step=$(( arrow_ticks * 3 ))
+                        (( log_scroll >= step )) && (( log_scroll -= step )) || log_scroll=0
                     else
-                        if (( cur_cat <= 6 )); then
-                            (( cur_item > 0 )) && (( cur_item-- ))
-                        else
-                            (( log_scroll > 0 )) && (( log_scroll-- ))
-                        fi
+                        (( cur_item >= arrow_ticks )) && (( cur_item -= arrow_ticks )) || cur_item=0
                     fi
                     ;;
                 "${ESC}[B"|"${ESC}OB"|"${ESC}[1;2B"|"${ESC}[1;5B"|j|J) # DOWN
@@ -3615,18 +3906,18 @@ run_audit_tui() {
                             log_scroll=0
                             item_scroll=0
                         fi
+                    elif (( cur_cat >= 7 )); then
+                        local -n cur_log_arr
+                        (( cur_cat == 7 )) && cur_log_arr="findings_lines" || cur_log_arr="summary_lines"
+                        local max_scroll=$(( ${#cur_log_arr[@]} - 5 ))
+                        (( max_scroll < 0 )) && max_scroll=0
+                        local step=$(( arrow_ticks * 3 ))
+                        (( log_scroll + step <= max_scroll )) && (( log_scroll += step )) || log_scroll=$max_scroll
                     else
-                        if (( cur_cat <= 6 )); then
-                            local -n cur_arr="cat_items_${cur_cat}"
-                            local max_it=${#cur_arr[@]}
-                            (( cur_item < max_it - 1 )) && (( cur_item++ ))
-                        else
-                            local -n cur_log_arr
-                            (( cur_cat == 7 )) && cur_log_arr="findings_lines" || cur_log_arr="summary_lines"
-                            local max_scroll=$(( ${#cur_log_arr[@]} - 5 ))
-                            (( max_scroll < 0 )) && max_scroll=0
-                            (( log_scroll < max_scroll )) && (( log_scroll++ ))
-                        fi
+                        local -n cur_arr="cat_items_${cur_cat}"
+                        local max_it=${#cur_arr[@]}
+                        (( cur_item + arrow_ticks < max_it )) && (( cur_item += arrow_ticks )) || cur_item=$(( max_it - 1 ))
+                        (( cur_item < 0 )) && cur_item=0
                     fi
                     ;;
                 "${ESC}[D"|"${ESC}OD") # LEFT
@@ -3635,15 +3926,23 @@ run_audit_tui() {
                 "${ESC}[C"|"${ESC}OC"|l|L) # RIGHT
                     pane_focus=1
                     ;;
-                ""|$'\n'|$'\r'|d|D) # ENTER or d: Drill-down modal
+                ""|$'\n'|$'\r') # ENTER: Select category or drill-down into item
+                    if (( pane_focus == 0 )); then
+                        pane_focus=1
+                    elif (( cur_cat <= 6 )); then
+                        in_drilldown=1
+                        drill_scroll=0
+                        while IFS= read -rsn1 -t 0.05 _discard <&3 2>/dev/null; do :; done
+                    fi
+                    ;;
+                d|D) # 'd': Drill-down modal
                     if (( cur_cat <= 6 )); then
                         in_drilldown=1
                         drill_scroll=0
                         while IFS= read -rsn1 -t 0.05 _discard <&3 2>/dev/null; do :; done
-                    else
-                        pane_focus=1
                     fi
                     ;;
+
                 "${ESC}[5~"|"${ESC}[5;2~") # PgUp
                     if (( pane_focus == 0 )); then
                         cur_cat=0
@@ -3663,12 +3962,19 @@ run_audit_tui() {
                         local max_it=${#cur_arr_pg[@]}
                         (( cur_item + 5 < max_it )) && (( cur_item += 5 )) || cur_item=$(( max_it - 1 ))
                     else
-                        (( log_scroll += 10 ))
+                        local -n cur_log_arr_pg
+                        (( cur_cat == 7 )) && cur_log_arr_pg="findings_lines" || cur_log_arr_pg="summary_lines"
+                        local max_pg=$(( ${#cur_log_arr_pg[@]} - 5 ))
+                        (( max_pg < 0 )) && max_pg=0
+                        (( log_scroll + 10 <= max_pg )) && (( log_scroll += 10 )) || log_scroll=$max_pg
                     fi
                     ;;
                 "${ESC}[1~"|"${ESC}[7~"|"${ESC}[H"|"${ESC}OH") # Home
                     if (( pane_focus == 0 )); then
                         cur_cat=0
+                        cur_item=0
+                        log_scroll=0
+                        item_scroll=0
                     else
                         cur_item=0
                         log_scroll=0
@@ -3677,6 +3983,15 @@ run_audit_tui() {
                 "${ESC}[4~"|"${ESC}[8~"|"${ESC}[F"|"${ESC}OF") # End
                     if (( pane_focus == 0 )); then
                         cur_cat=8
+                        cur_item=0
+                        log_scroll=0
+                        item_scroll=0
+                    elif (( cur_cat >= 7 )); then
+                        local -n cur_log_arr_end
+                        (( cur_cat == 7 )) && cur_log_arr_end="findings_lines" || cur_log_arr_end="summary_lines"
+                        local max_end=$(( ${#cur_log_arr_end[@]} - 5 ))
+                        (( max_end < 0 )) && max_end=0
+                        log_scroll=$max_end
                     else
                         local -n cur_arr_end="cat_items_${cur_cat}"
                         local max_it=${#cur_arr_end[@]}
@@ -3689,6 +4004,7 @@ run_audit_tui() {
                         cur_item=0
                         log_scroll=0
                         item_scroll=0
+                        pane_focus=0
                     fi
                     ;;
                 s|S)
