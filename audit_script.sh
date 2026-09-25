@@ -3221,14 +3221,13 @@ run_audit_tui() {
         local sub_txt=" IP: ${MAIN_IP:-N/A} | OS: ${DISTRO_NAME:-Linux} | Load: ${LOAD:-0} | RAM: ${RAM_PCT:-0}% | Disk: ${DISK_PCT:-0}%"
         buf+="${BG_SUBHDR}$(tui_fit_str "$sub_txt" "$term_cols")${C_RESET}"$'\033[K\n'
 
-        # Body Rows (lines 3 to 3+body_h-1)
+        # Body Rows - TOP PANE ONLY (lines 3 to 3+top_h-1)
         local r screen_row
-        for (( r=0; r<body_h; r++ )); do
+        for (( r=0; r<top_h; r++ )); do
             screen_row=$(( r + 3 ))
 
-            if (( r < top_h )); then
-                # Left Pane content
-                local left_txt=""
+            # Left Pane content
+            local left_txt=""
                 if (( r == 0 )); then
                     left_txt="${C_BOLD}${C_CYAN} AUDIT CATEGORIES${C_RESET}"
                 elif (( r == 1 )); then
@@ -3344,139 +3343,158 @@ run_audit_tui() {
                     fi
                 fi
 
-                buf+=$'\033['"${screen_row};1H"$'\033[2K'"${left_txt}"
-                buf+=$'\033['"${screen_row};${div_col}H${C_DARKGREY}│${C_RESET}"
-                buf+=$'\033['"${screen_row};${right_col}H${right_txt}"
+            buf+=$'\033['"${screen_row};1H"$'\033[2K'"${left_txt}"
+            buf+=$'\033['"${screen_row};${div_col}H${C_DARKGREY}│${C_RESET}"
+            buf+=$'\033['"${screen_row};${right_col}H${right_txt}"
+        done  # end top-pane loop
+
+        # ── BOTTOM PANE ─────────────────────────────────────────────────────────
+        # Build _blines content array (full sentences, no word-wrap needed)
+        local sel_label="" sel_st="" sel_det="" sel_key=""
+        if (( ${#cur_items_ref[@]} > 0 )); then
+            IFS='|' read -r sel_label sel_st sel_det sel_key <<< "${cur_items_ref[cur_item]}"
+        fi
+        local is_red_item=0
+        [[ "$sel_st" == "RED" ]] && is_red_item=1
+
+        _blines=()
+
+        # _blines_wrap[i]=1 means entry i should be printed with autowrap (full sentence)
+        _blines_wrap=()
+
+        # Row 0: divider
+        local div_title
+        if (( is_red_item == 1 )); then
+            div_title="── [ DETAILS & RECOMMENDATIONS ] (Press ENTER to Drill Down) "
+        else
+            div_title="── [ DETAILS & FINDINGS ] (Press ENTER to Drill Down) "
+        fi
+        local pad_len=$(( term_cols - ${#div_title} ))
+        (( pad_len < 0 )) && pad_len=0
+        _blines+=("${C_DARKGREY}${div_title}$(tui_repeat_char '─' "$pad_len")${C_RESET}")
+        _blines_wrap+=(0)
+
+        # Row 1: item summary
+        if [[ -n "$sel_label" ]]; then
+            _blines+=("${C_BOLD}Item:${C_RESET} ${C_CYAN}${sel_label}${C_RESET}   ${C_BOLD}Status:${C_RESET} $(tui_badge "$sel_st")   ${C_BOLD}Summary:${C_RESET} $(tui_fit_str "$sel_det" $(( term_cols - 45 )))")
+        else
+            _blines+=("")
+        fi
+        _blines_wrap+=(0)
+
+        if (( is_red_item == 1 )); then
+            # Issue
+            local issue_raw="${cur_issues_ref[cur_item]}"
+            issue_raw="${issue_raw//$'\r'/}"
+            issue_raw="${issue_raw//$'\n'/ }"
+            issue_raw="${issue_raw//\\n/ }"
+            issue_raw="${issue_raw#"${issue_raw%%[! ]*}"}"
+            issue_raw="${issue_raw%"${issue_raw##*[! ]}"}"
+
+            # Recommendation
+            local rec_raw="${cur_recs_ref[cur_item]}"
+            rec_raw="${rec_raw//$'\r'/}"
+            rec_raw="${rec_raw//$'\n'/ }"
+            rec_raw="${rec_raw//\\n/ }"
+            rec_raw="${rec_raw#"${rec_raw%%[! ]*}"}"
+            rec_raw="${rec_raw%"${rec_raw##*[! ]}"}"
+            [[ -z "$rec_raw" ]] && rec_raw="Investigate and remediate $sel_label to restore normal system operations."
+
+            _blines+=("${C_RED}${C_BOLD}Issue:${C_RESET}")
+            _blines_wrap+=(0)
+            _blines+=("$issue_raw")         # FULL sentence, autowrap will handle visuals
+            _blines_wrap+=(1)
+            _blines+=("${C_GREEN}${C_BOLD}Recommendation:${C_RESET}")
+            _blines_wrap+=(0)
+            _blines+=("$rec_raw")           # FULL sentence, autowrap will handle visuals
+            _blines_wrap+=(1)
+
+            if (( ${#f_lines[@]} > 0 )); then
+                _blines+=("${C_YELLOW}${C_BOLD}Findings & Details (${#f_lines[@]} entries):${C_RESET}")
+                _blines_wrap+=(0)
+                local bfi
+                for (( bfi=0; bfi<${#f_lines[@]}; bfi++ )); do
+                    _blines+=("  ${C_WHITE}• $(tui_fit_str "${f_lines[bfi]}" $(( term_cols - 5 )))${C_RESET}")
+                    _blines_wrap+=(0)
+                done
             else
-                # Bottom Section: FULL-WIDTH Details & Recommendations / Findings
-                # Pre-compute bot_lines array ONCE per render (done at bot_r==0)
-                local bot_r=$(( r - top_h ))
-                local sel_label="" sel_st="" sel_det="" sel_key=""
-                if (( ${#cur_items_ref[@]} > 0 )); then
-                    IFS='|' read -r sel_label sel_st sel_det sel_key <<< "${cur_items_ref[cur_item]}"
-                fi
-
-                local is_red_item=0
-                [[ "$sel_st" == "RED" ]] && is_red_item=1
-
-                # Build bot_lines array once (at bot_r==0 for this render pass)
-                # We use a file-scoped local that persists within the render_tui call.
-                # Since bash functions share locals within the same call stack, we
-                # use a naming convention: _blines_built to track if array is ready.
-                if (( bot_r == 0 )); then
-                    _blines=()
-                    _blines_built=1
-
-                    # Row 0: separator
-                    local div_title
-                    if (( is_red_item == 1 )); then
-                        div_title="── [ DETAILS & RECOMMENDATIONS ] (Press ENTER to Drill Down) "
-                    else
-                        div_title="── [ DETAILS & FINDINGS ] (Press ENTER to Drill Down) "
-                    fi
-                    local pad_len=$(( term_cols - ${#div_title} ))
-                    (( pad_len < 0 )) && pad_len=0
-                    _blines+=("${C_DARKGREY}${div_title}$(tui_repeat_char '─' "$pad_len")${C_RESET}")
-
-                    # Row 1: item summary
-                    if [[ -n "$sel_label" ]]; then
-                        _blines+=("${C_BOLD}Item:${C_RESET} ${C_CYAN}${sel_label}${C_RESET}   ${C_BOLD}Status:${C_RESET} $(tui_badge "$sel_st")   ${C_BOLD}Summary:${C_RESET} $(tui_fit_str "$sel_det" $(( term_cols - 45 )))")
-                    else
-                        _blines+=("")
-                    fi
-
-                    if (( is_red_item == 1 )); then
-                        # Issue section
-                        local issue_raw="${cur_issues_ref[cur_item]}"
-                        issue_raw="${issue_raw//$'\r'/}"
-                        issue_raw="${issue_raw//$'\n'/ }"
-                        issue_raw="${issue_raw//\\n/ }"
-                        # Trim leading/trailing spaces
-                        issue_raw="${issue_raw#"${issue_raw%%[! ]*}"}"
-                        issue_raw="${issue_raw%"${issue_raw##*[! ]}"}"
-
-                        local rec_raw="${cur_recs_ref[cur_item]}"
-                        rec_raw="${rec_raw//$'\r'/}"
-                        rec_raw="${rec_raw//$'\n'/ }"
-                        rec_raw="${rec_raw//\\n/ }"
-                        rec_raw="${rec_raw#"${rec_raw%%[! ]*}"}"
-                        rec_raw="${rec_raw%"${rec_raw##*[! ]}"}"
-                        [[ -z "$rec_raw" ]] && rec_raw="Investigate and remediate $sel_label to restore normal system operations."
-
-                        # Issue header + wrapped text
-                        _blines+=("${C_RED}${C_BOLD}Issue:${C_RESET}")
-                        # Word-wrap issue text to term_cols
-                        local remaining="$issue_raw"
-                        while [[ ${#remaining} -gt $term_cols ]]; do
-                            # Find last space within term_cols
-                            local chunk="${remaining:0:$term_cols}"
-                            local cut_at=$term_cols
-                            # Try to break at last space
-                            local sp_pos=${chunk% *}
-                            if [[ "$sp_pos" != "$chunk" ]] && (( ${#sp_pos} > 0 )); then
-                                cut_at=${#sp_pos}
-                            fi
-                            _blines+=("${remaining:0:$cut_at}")
-                            remaining="${remaining:$cut_at}"
-                            remaining="${remaining#" "}"  # strip leading space
-                        done
-                        [[ -n "$remaining" ]] && _blines+=("$remaining")
-
-                        # Recommendation header + wrapped text
-                        _blines+=("${C_GREEN}${C_BOLD}Recommendation:${C_RESET}")
-                        remaining="$rec_raw"
-                        while [[ ${#remaining} -gt $term_cols ]]; do
-                            local chunk="${remaining:0:$term_cols}"
-                            local cut_at=$term_cols
-                            local sp_pos=${chunk% *}
-                            if [[ "$sp_pos" != "$chunk" ]] && (( ${#sp_pos} > 0 )); then
-                                cut_at=${#sp_pos}
-                            fi
-                            _blines+=("${remaining:0:$cut_at}")
-                            remaining="${remaining:$cut_at}"
-                            remaining="${remaining#" "}"
-                        done
-                        [[ -n "$remaining" ]] && _blines+=("$remaining")
-
-                        # Findings header
-                        if (( ${#f_lines[@]} > 0 )); then
-                            _blines+=("${C_YELLOW}${C_BOLD}Findings & Details (${#f_lines[@]} entries):${C_RESET}")
-                            local fi
-                            for (( fi=0; fi<${#f_lines[@]}; fi++ )); do
-                                _blines+=("  ${C_WHITE}• $(tui_fit_str "${f_lines[fi]}" $(( term_cols - 5 )))${C_RESET}")
-                            done
-                        else
-                            _blines+=("${C_GREY}Findings & Details: Verified normal.${C_RESET}")
-                        fi
-                    else
-                        # GREEN/OK item: show Findings directly
-                        if (( ${#f_lines[@]} > 0 )); then
-                            _blines+=("${C_YELLOW}${C_BOLD}Findings & Details (${#f_lines[@]} entries):${C_RESET}")
-                            local fi
-                            for (( fi=0; fi<${#f_lines[@]}; fi++ )); do
-                                _blines+=("  ${C_WHITE}• $(tui_fit_str "${f_lines[fi]}" $(( term_cols - 5 )))${C_RESET}")
-                            done
-                        else
-                            _blines+=("${C_GREY}Findings & Details: Verified normal.${C_RESET}")
-                        fi
-                    fi
-                fi
-
-                # Render from bot_lines array
-                local bot_txt=""
-                local total_bot=${#_blines[@]}
-                local avail_bot=$(( body_h - top_h ))
-
-                # Show truncation hint on last row if more content exists
-                if (( bot_r < total_bot )); then
-                    bot_txt="${_blines[bot_r]}"
-                    if (( bot_r == avail_bot - 1 && total_bot > avail_bot )); then
-                        bot_txt="  ${C_CYAN}... and $(( total_bot - bot_r )) more entries [Press ENTER for full list in Drill-Down]${C_RESET}"
-                    fi
-                fi
-
-                buf+=$'\033['"${screen_row};1H"$'\033[2K'"${bot_txt}"
+                _blines+=("${C_GREY}Findings & Details: Verified normal.${C_RESET}")
+                _blines_wrap+=(0)
             fi
+        else
+            # GREEN/OK item: no Issue/Recommendation, show Findings directly
+            if (( ${#f_lines[@]} > 0 )); then
+                _blines+=("${C_YELLOW}${C_BOLD}Findings & Details (${#f_lines[@]} entries):${C_RESET}")
+                _blines_wrap+=(0)
+                local bfi
+                for (( bfi=0; bfi<${#f_lines[@]}; bfi++ )); do
+                    _blines+=("  ${C_WHITE}• $(tui_fit_str "${f_lines[bfi]}" $(( term_cols - 5 )))${C_RESET}")
+                    _blines_wrap+=(0)
+                done
+            else
+                _blines+=("${C_GREY}Findings & Details: Verified normal.${C_RESET}")
+                _blines_wrap+=(0)
+            fi
+        fi
+
+        # Clear ALL bottom rows first (prevents stale content when switching items)
+        local bot_start=$(( top_h + 3 ))   # screen row of first bottom line
+        local bot_end=$(( body_h + 2 ))    # screen row of last bottom line
+        local bot_r
+        for (( bot_r=bot_start; bot_r<=bot_end; bot_r++ )); do
+            buf+=$'\033['"${bot_r};1H"$'\033[2K'
+        done
+
+        # Position cursor at first bottom row and render _blines document-style.
+        # For normal (non-wrap) entries: use absolute positioning + ?7l clip.
+        # For autowrap entries (full sentences): enable ?7h, print full text,
+        #   then re-disable ?7l and skip the rows the text consumed.
+        buf+=$'\033['"${bot_start};1H"
+        local cur_screen_row=$bot_start
+        local bi
+        for (( bi=0; bi<${#_blines[@]}; bi++ )); do
+            # Stop if we've used up all available bottom rows
+            (( cur_screen_row > bot_end )) && break
+
+            local entry="${_blines[bi]}"
+            local do_wrap=${_blines_wrap[bi]}
+
+            if (( do_wrap == 1 )); then
+                # Print full sentence with autowrap on — terminal tracks it as
+                # one logical line, so triple-click selects the whole sentence.
+                # Calculate how many screen rows it will consume (for cursor tracking).
+                # Strip ANSI to count visible chars:
+                local vis_len=${#entry}    # entry is raw text, no ANSI codes
+                local rows_used=$(( (vis_len + term_cols - 1) / term_cols ))
+                (( rows_used < 1 )) && rows_used=1
+
+                # Clamp: don't spill into footer
+                local rows_avail=$(( bot_end - cur_screen_row + 1 ))
+                if (( rows_used > rows_avail )); then
+                    rows_used=$rows_avail
+                    # Truncate entry to what fits
+                    local max_chars=$(( rows_avail * term_cols ))
+                    entry="${entry:0:$max_chars}"
+                fi
+
+                buf+=$'\033[?7h'"${entry}"$'\033[?7l'
+                # After autowrap, cursor is at column (vis_len % term_cols) + 1
+                # on row (cur_screen_row + rows_used - 1).
+                # Move to start of next row:
+                cur_screen_row=$(( cur_screen_row + rows_used ))
+                (( cur_screen_row <= bot_end )) && buf+=$'\033['"${cur_screen_row};1H"
+            else
+                # Normal single-row entry (header, divider, findings bullet)
+                buf+=$'\033['"${cur_screen_row};1H"$'\033[2K'"${entry}"
+                (( cur_screen_row++ ))
+                (( cur_screen_row <= bot_end )) && buf+=$'\033['"${cur_screen_row};1H"
+            fi
+        done
+
+        # Ensure remaining bottom rows are blank
+        while (( cur_screen_row <= bot_end )); do
+            buf+=$'\033['"${cur_screen_row};1H"$'\033[2K'
+            (( cur_screen_row++ ))
         done
 
         # Footer row
