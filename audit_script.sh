@@ -36,7 +36,50 @@ RECOMMENDATIONS_FILE="$SCRIPT_DIR/audit-issues-recommendations.log"
 DEBUG_LOG="$SCRIPT_DIR/audit-debug.log"
 
 STATE_DIR=$(mktemp -d /tmp/bc-audit.XXXXXX)
-trap 'rm -rf "$STATE_DIR"' EXIT
+TUI_OLD_STTY=""
+
+cleanup_terminal() {
+    # Reset terminal modes:
+    # Disable mouse tracking (?1000l ?1002l ?1003l ?1006l ?1015l)
+    # Disable alternate screen wheel translation (?1007l)
+    # Re-enable line wrap (?7h), show cursor (?25h), reset colors (\033[0m), exit alternate screen (?1049l)
+    local reset_seq=$'\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l\033[?1007l\033[?7h\033[?25h\033[0m\033[?1049l'
+    if [ -n "${3+x}" ] && [ -w /dev/fd/3 ] 2>/dev/null; then
+        printf '%s' "$reset_seq" >&3 2>/dev/null
+    fi
+    if [ -c /dev/tty ] && [ -w /dev/tty ]; then
+        printf '%s' "$reset_seq" > /dev/tty 2>/dev/null
+    fi
+    printf '%s' "$reset_seq" 2>/dev/null
+
+    if [[ -n "$TUI_OLD_STTY" ]]; then
+        if [ -c /dev/tty ] && [ -r /dev/tty ]; then
+            stty "$TUI_OLD_STTY" < /dev/tty 2>/dev/null
+        fi
+        stty "$TUI_OLD_STTY" 2>/dev/null
+    fi
+
+    # Failsafe: unconditionally restore standard healthy terminal discipline (echo, canonical, signals, newline conversion)
+    for _dev in "/dev/tty" "/dev/stdin"; do
+        if [ -r "$_dev" ]; then
+            stty echo icanon iexten isig opost onlcr < "$_dev" 2>/dev/null
+        fi
+    done
+    stty echo icanon iexten isig opost onlcr 2>/dev/null
+    exec 3>&- 3<&- 2>/dev/null || true
+}
+
+full_cleanup() {
+    cleanup_terminal
+    if [[ -n "$STATE_DIR" && -d "$STATE_DIR" ]]; then
+        rm -rf "$STATE_DIR" 2>/dev/null || true
+    fi
+}
+
+trap 'full_cleanup; exit 130' INT
+trap 'full_cleanup; exit 143' TERM
+trap 'full_cleanup' EXIT
+
 
 if [[ "$is_view_mode" != "true" ]]; then
     mkdir -p "$SCRIPT_DIR" 2>/dev/null || true
@@ -2978,12 +3021,12 @@ run_audit_tui() {
         use_fd3=true
     fi
 
-    # Save original terminal settings and enter raw mode
-    local old_stty=""
+    # Save original terminal settings and enter raw mode (keep isig so Ctrl+C raises SIGINT)
     if $use_fd3; then
-        old_stty=$(stty -g <&3 2>/dev/null)
-        stty raw -echo min 1 time 0 <&3 2>/dev/null
+        TUI_OLD_STTY=$(stty -g <&3 2>/dev/null || stty -g < /dev/tty 2>/dev/null || stty -g 2>/dev/null)
+        stty raw -echo isig min 1 time 0 <&3 2>/dev/null
     fi
+
 
     local C_RESET=$'\033[0m'
     local C_BOLD=$'\033[1m'
@@ -3019,14 +3062,12 @@ run_audit_tui() {
     }
 
     tui_cleanup() {
-        if $use_fd3; then
-            printf '\033[?25h\033[?7h\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1007h\033[?1049l' >&3 2>/dev/null
-            [[ -n "$old_stty" ]] && stty "$old_stty" <&3 2>/dev/null
-            exec 3>&- 3<&- 2>/dev/null
-        fi
+        cleanup_terminal
     }
-    trap 'tui_cleanup; exit 0' INT TERM
-    trap 'tui_cleanup' EXIT
+    trap 'full_cleanup; exit 130' INT
+    trap 'full_cleanup; exit 143' TERM
+    trap 'full_cleanup' EXIT
+
 
     if $use_fd3; then
         # Enter alternate screen, hide cursor, disable line wrap (?7l), enable alternate screen mouse wheel translation (?1007h)
@@ -3838,7 +3879,7 @@ run_audit_tui() {
             # Handle Drill-down modal interactions
             if (( in_drilldown == 1 )); then
                 case "$key" in
-                    q|Q|"$ESC"|""|$'\n'|$'\r'|d|D|" "|x|X)
+                    q|Q|"$ESC"|""|$'\n'|$'\r'|d|D|" "|x|X|$'\x03')
                         in_drilldown=0
                         while IFS= read -rsn1 -t 0.05 _discard <&3 2>/dev/null; do :; done
                         ;;
@@ -3876,7 +3917,7 @@ run_audit_tui() {
             fi
 
             case "$key" in
-                q|Q|"$ESC")
+                q|Q|"$ESC"|$'\x03')
                     break
                     ;;
                 "?"|H)
@@ -4077,6 +4118,8 @@ run_audit_tui() {
             render_tui
         done
     fi
+    trap - WINCH 2>/dev/null || true
+    cleanup_terminal
 }
 
 #-------------------------------------------------------------------------------
