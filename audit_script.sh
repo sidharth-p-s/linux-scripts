@@ -3228,7 +3228,7 @@ run_audit_tui() {
         else
             health_tag="${C_RED}▲ NEEDS ATTENTION${C_RESET}"
         fi
-        buf+="${BG_HEADER}$(tui_fit_str " BOBCARES SERVER AUDIT (GoAccess TUI) | Host: $HOSTNAME" $(( term_cols - 20 )) ) Health: ${health_tag}${C_RESET}"$'\033[K\n'
+        buf+="${BG_HEADER}$(tui_fit_str " BOBCARES SERVER AUDIT (TUI) | Host: $HOSTNAME" $(( term_cols - 20 )) ) Health: ${health_tag}${C_RESET}"$'\033[K\n'
 
         # Line 2: Sub-header
         local sub_txt=" IP: ${MAIN_IP:-N/A} | OS: ${DISTRO_NAME:-Linux} | Load: ${LOAD:-0} | RAM: ${RAM_PCT:-0}% | Disk: ${DISK_PCT:-0}%"
