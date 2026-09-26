@@ -454,7 +454,6 @@ setup_security_tools() {
         SECURITY_ACTIONS+="freshclam missing; "
     fi
 
-    MALWARE_SCRIPT_FRESHLY_INSTALLED="no"
     for script in bobcares-malware-scan.sh run-weekly-malware-scan.sh; do
         if [ -f "/root/scripts/$script" ]; then
             SECURITY_ACTIONS+="$script present; "
@@ -462,7 +461,6 @@ setup_security_tools() {
             SECURITY_ACTIONS+="$script missing; "
         fi
     done
-    export MALWARE_SCRIPT_FRESHLY_INSTALLED
 
     if [ -f /etc/cron.d/bc-malware-scan ]; then
         SECURITY_ACTIONS+="malware-scan cron present; "
@@ -770,24 +768,6 @@ check_root_password_age() {
 # NEW v4: Threat protection tool status (Malware Scanner / Rootkit Scanner)
 #-------------------------------------------------------------------------------
 
-install_malware_cron() {
-    [[ $EUID -ne 0 ]] && return
-
-    echo "[INFO] ClamAV is installed but malware scan cron is missing. Auto-configuring /etc/cron.d/bc-malware-scan..."
-    mkdir -p /root/scripts
-
-    curl -sSL -m 15 -o /root/scripts/run-weekly-malware-scan.sh http://ims.bobcares.com/run-weekly-malware-scan.sh 2>/dev/null || \
-    wget -q -T 15 -O /root/scripts/run-weekly-malware-scan.sh http://ims.bobcares.com/run-weekly-malware-scan.sh 2>/dev/null
-
-    curl -sSL -m 15 -o /root/scripts/bobcares-malware-scan.sh http://ims.bobcares.com/bobcares-malware-scan.sh 2>/dev/null || \
-    wget -q -T 15 -O /root/scripts/bobcares-malware-scan.sh http://ims.bobcares.com/bobcares-malware-scan.sh 2>/dev/null
-
-    curl -sSL -m 15 -o /etc/cron.d/bc-malware-scan http://ims.bobcares.com/bc-malware-scan.txt 2>/dev/null || \
-    wget -q -T 15 -O /etc/cron.d/bc-malware-scan http://ims.bobcares.com/bc-malware-scan.txt 2>/dev/null
-
-    chmod 755 /root/scripts/run-weekly-malware-scan.sh /root/scripts/bobcares-malware-scan.sh 2>/dev/null
-}
-
 check_threat_tools() {
     local clam="no" cron="no"
     command -v clamscan >/dev/null 2>&1 && clam="yes"
@@ -795,16 +775,6 @@ check_threat_tools() {
         && grep -Eqv '^[[:space:]]*(#|$)' /etc/cron.d/bc-malware-scan \
         && grep -Eqi 'bobcares-malware-scan|run-weekly-malware-scan' /etc/cron.d/bc-malware-scan; then
         cron="yes"
-    fi
-
-    # Auto-install cron only if ClamAV is installed but the cron is missing
-    if [[ "$clam" == "yes" && "$cron" == "no" ]]; then
-        install_malware_cron
-        if [[ -f /etc/cron.d/bc-malware-scan ]] \
-            && grep -Eqv '^[[:space:]]*(#|$)' /etc/cron.d/bc-malware-scan \
-            && grep -Eqi 'bobcares-malware-scan|run-weekly-malware-scan' /etc/cron.d/bc-malware-scan; then
-            cron="yes"
-        fi
     fi
 
     if [[ "$clam" == "yes" && "$cron" == "yes" ]]; then
