@@ -1235,7 +1235,9 @@ check_system_version() {
     # The Operating System row represents kernel currency only.  Application
     # packages are reported separately as PHP, web server, database, or Other.
     SYSTEM_UPDATE_STATUS="$KERNEL_STATUS"
-    SYSTEM_LATEST="Running kernel: $KERNEL_RUNNING; kernel packages pending: ${KERNEL_UPDATE_COUNT:-0}${KERNEL_ANALYSIS:+; $KERNEL_ANALYSIS}"
+    local kc_info=""
+    [[ "$KC_ACTIVE" == "yes" ]] && kc_info="; KernelCare: $KC_STATUS"
+    SYSTEM_LATEST="Running kernel: $KERNEL_RUNNING${kc_info}; kernel packages pending: ${KERNEL_UPDATE_COUNT:-0}${KERNEL_ANALYSIS:+; $KERNEL_ANALYSIS}"
     SYSTEM_SOURCE="Kernel"
 
     export SYSTEM_UPDATE_STATUS SYSTEM_LATEST SYSTEM_SOURCE
@@ -2294,7 +2296,6 @@ Web Server Uptime : $HTTP_UPTIME
 | Web Server | $([[ $HTTPD_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $HTTPD_UPDATE_COUNT pending web server update(s) |
 | Database Server | $([[ $MYSQL_UPDATE_COUNT -gt 0 ]] && echo "RED" || echo "GREEN") | $MYSQL_UPDATE_COUNT pending DB update(s) |
 | Other Softwares | $other_line | $OTHER_UPDATE_COUNT other pending package(s)${OTHER_UPDATE_PKGS:+: $OTHER_UPDATE_PKGS} |
-| Kernel | $(portal_status "$KERNEL_STATUS") | Running: $KERNEL_RUNNING \| Update: $KERNEL_UPDATE_AVAILABLE \| KernelCare: $KC_STATUS |
 | Reboot Required | $(portal_status "$REBOOT_STATUS") | $REBOOT_REASON |
 
 ## 3. Server Health
@@ -2524,7 +2525,6 @@ tui_get_cat_items() {
             echo "Web Server|$([[ ${HTTPD_UPDATE_COUNT:-0} -gt 0 ]] && echo 'RED' || echo 'GREEN')|${HTTPD_UPDATE_COUNT:-0} pending web-server updates|web_server_update"
             echo "Database Server|$([[ ${MYSQL_UPDATE_COUNT:-0} -gt 0 ]] && echo 'RED' || echo 'GREEN')|${MYSQL_UPDATE_COUNT:-0} pending DB updates|db_server_update"
             echo "Other Software Packages|$([[ ${OTHER_UPDATE_COUNT:-0} -gt 0 ]] && echo 'RED' || echo 'GREEN')|${OTHER_UPDATE_COUNT:-0} pending other packages|other_update"
-            echo "Kernel Update Status|$(portal_status "$KERNEL_STATUS")|Running: ${KERNEL_RUNNING:-unknown} (Update: ${KERNEL_UPDATE_AVAILABLE:-No})|kernel_update"
             echo "Reboot Required|$(portal_status "$REBOOT_STATUS")|${REBOOT_REASON:-No reboot needed}|reboot_required"
             ;;
         2)
