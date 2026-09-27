@@ -1067,9 +1067,9 @@ check_kernel_status() {
     if [[ "$KERNEL_ENV" == "standard" ]]; then
         local repo_kernel=""
         if [[ "$PKG_MGR" == "dnf" || "$PKG_MGR" == "yum" ]]; then
-            repo_kernel=$($PKG_MGR check-update kernel --quiet 2>/dev/null | awk '/^kernel\./{print $2; exit}')
+            repo_kernel=$($PKG_MGR check-update kernel kernel-core --quiet 2>/dev/null | awk '/^kernel(-(core|rt|rt-core|uek|uek-core|ml|ml-core|lt|lt-core))?(\.|\s)/{print $2; exit}')
         elif [[ "$PKG_MGR" == "apt" ]]; then
-            repo_kernel=$(apt list --upgradable 2>/dev/null | awk -F'[/ ]' '/^linux-image|^linux-generic/{print $3; exit}')
+            repo_kernel=$(apt list --upgradable 2>/dev/null | awk -F'[/ ]' '/^linux-image(-|\/)/{print $3; exit}')
         fi
         [[ -n "$repo_kernel" ]] && KERNEL_UPDATE_AVAILABLE="Yes ($repo_kernel)"
 
@@ -1171,9 +1171,9 @@ check_package_updates() {
             PHP_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(ea-php|alt-php|lsphp|rh-php|php)' || true)
             HTTPD_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd)' || true)
             MYSQL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Eci '^(MariaDB-|mysql|mariadb|percona|postgres|postgresql|mongodb|sqlite)' || true)
-            KERNEL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(kernel|linux-firmware)' || true)
+            KERNEL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^kernel(-(core|rt|rt-core|uek|uek-core|ml|ml-core|lt|lt-core))?(\.|\s)' || true)
             OTHER_UPDATE_PKGS=$(printf '%s\n' "${_pkg_updates[@]}" \
-                | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd|MariaDB-|mysql|mariadb|percona|postgres|postgresql|mongodb|sqlite|kernel|linux-firmware)' \
+                | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd|MariaDB-|mysql|mariadb|percona|postgres|postgresql|mongodb|sqlite|kernel(-(core|rt|rt-core|uek|uek-core|ml|ml-core|lt|lt-core))?(\.|\s))' \
                 | awk -F. '{print $1}' | sort -u | paste -sd ', ' - | head -c 300)
         fi
 
@@ -1194,10 +1194,10 @@ check_package_updates() {
             PHP_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(ea-php|alt-php|lsphp|rh-php|php)' || true)
             HTTPD_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^(apache2|httpd|nginx|openlitespeed|litespeed|caddy|lighttpd)' || true)
             MYSQL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Eci '^(mariadb|mysql|percona|postgres|postgresql|redis|mongodb|sqlite)' || true)
-            KERNEL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^linux-(base|image|headers|modules|generic|tools|firmware)' || true)
+            KERNEL_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ec '^linux-image(-|\/)' || true)
             SEC_UPDATE_COUNT=$(printf '%s\n' "${_pkg_updates[@]}" | grep -ci 'security' || true)
             OTHER_UPDATE_PKGS=$(printf '%s\n' "${_pkg_updates[@]}" \
-                | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|apache2|httpd|nginx|openlitespeed|litespeed|caddy|lighttpd|mariadb|mysql|percona|postgres|postgresql|redis|mongodb|sqlite|linux-(base|image|headers|modules|generic|tools|firmware))' \
+                | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|apache2|httpd|nginx|openlitespeed|litespeed|caddy|lighttpd|mariadb|mysql|percona|postgres|postgresql|redis|mongodb|sqlite|linux-image(-|\/))' \
                 | awk -F/ '{print $1}' | sort -u | paste -sd ', ' - | head -c 300)
         fi
     fi
@@ -1209,17 +1209,17 @@ check_package_updates() {
     # These lists include target and installed versions, not just package names.
     UPDATE_ALL_LIST=$(printf '%s\n' "${_pkg_updates[@]}")
     if [[ "$PKG_MGR" == "apt" ]]; then
-        KERNEL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^linux-(base|image|headers|modules|generic|tools|firmware)' || true)
+        KERNEL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^linux-image(-|\/)' || true)
         PHP_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(ea-php|alt-php|lsphp|rh-php|php)' || true)
         HTTPD_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(apache2|httpd|nginx|openlitespeed|litespeed|caddy|lighttpd)' || true)
         MYSQL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ei '^(mariadb|mysql|percona|postgres|postgresql|redis|mongodb|sqlite)' || true)
-        OTHER_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|apache2|httpd|nginx|openlitespeed|litespeed|caddy|lighttpd|mariadb|mysql|percona|postgres|postgresql|redis|mongodb|sqlite|linux-(base|image|headers|modules|generic|tools|firmware))' || true)
+        OTHER_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|apache2|httpd|nginx|openlitespeed|litespeed|caddy|lighttpd|mariadb|mysql|percona|postgres|postgresql|redis|mongodb|sqlite|linux-image(-|\/))' || true)
     else
-        KERNEL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(kernel|linux-firmware)' || true)
+        KERNEL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^kernel(-(core|rt|rt-core|uek|uek-core|ml|ml-core|lt|lt-core))?(\.|\s)' || true)
         PHP_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(ea-php|alt-php|lsphp|rh-php|php)' || true)
         HTTPD_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -E '^(httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd)' || true)
         MYSQL_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Ei '^(MariaDB-|mysql|mariadb|percona|postgres|postgresql|redis|mongodb|sqlite)' || true)
-        OTHER_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd|MariaDB-|mysql|mariadb|percona|postgres|postgresql|redis|mongodb|sqlite|kernel|linux-firmware)' || true)
+        OTHER_UPDATE_LIST=$(printf '%s\n' "${_pkg_updates[@]}" | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd|MariaDB-|mysql|mariadb|percona|postgres|postgresql|redis|mongodb|sqlite|kernel(-(core|rt|rt-core|uek|uek-core|ml|ml-core|lt|lt-core))?(\.|\s))' || true)
     fi
 
     export OS_UPDATE_COUNT SEC_UPDATE_COUNT PHP_UPDATE_COUNT HTTPD_UPDATE_COUNT MYSQL_UPDATE_COUNT KERNEL_UPDATE_COUNT OTHER_UPDATE_COUNT OTHER_UPDATE_PKGS \
@@ -2599,11 +2599,11 @@ tui_get_item_details() {
                 elif [[ -f "$FINDINGS_FILE" ]] && grep -q "OTHER SOFTWARE UPDATES" "$FINDINGS_FILE" 2>/dev/null; then
                     pkgs=$(awk '/^OTHER SOFTWARE UPDATES/{flag=1; next} flag && /^===/{if(seen){exit}else{seen=1; next}} flag && seen{print}' "$FINDINGS_FILE" 2>/dev/null | grep -v '^None$' || true)
                 elif command -v apt >/dev/null 2>&1; then
-                    pkgs=$(apt list --upgradable 2>/dev/null | grep -E '^\S+/' | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|apache2|httpd|nginx|mariadb|mysql|linux-)' || true)
+                    pkgs=$(apt list --upgradable 2>/dev/null | grep -E '^\S+/' | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|apache2|httpd|nginx|mariadb|mysql|linux-image(-|\/))' || true)
                 elif command -v dnf >/dev/null 2>&1; then
-                    pkgs=$(dnf check-update -q 2>/dev/null | grep -v '^\s*$' | grep -Evi '(kernel|linux-firmware|php|httpd|nginx|mariadb|mysql)' || true)
+                    pkgs=$(dnf check-update -q 2>/dev/null | grep -v '^\s*$' | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd|MariaDB-|mysql|mariadb|percona|postgres|postgresql|redis|mongodb|sqlite|kernel(-(core|rt|rt-core|uek|uek-core|ml|ml-core|lt|lt-core))?(\.|\s))' || true)
                 elif command -v yum >/dev/null 2>&1; then
-                    pkgs=$(yum check-update -q 2>/dev/null | grep -v '^\s*$' | grep -Evi '(kernel|linux-firmware|php|httpd|nginx|mariadb|mysql)' || true)
+                    pkgs=$(yum check-update -q 2>/dev/null | grep -v '^\s*$' | grep -Evi '^(ea-php|alt-php|lsphp|rh-php|php|httpd|ea-apache24|nginx|openlitespeed|litespeed|caddy|lighttpd|MariaDB-|mysql|mariadb|percona|postgres|postgresql|redis|mongodb|sqlite|kernel(-(core|rt|rt-core|uek|uek-core|ml|ml-core|lt|lt-core))?(\.|\s))' || true)
                 fi
                 if [[ -z "$OTHER_UPDATE_COUNT" || "$OTHER_UPDATE_COUNT" -eq 0 ]] && [[ -n "$pkgs" ]]; then
                     OTHER_UPDATE_COUNT=$(printf '%s\n' "$pkgs" | grep -c . || echo 0)
@@ -2623,11 +2623,11 @@ tui_get_item_details() {
                 elif [[ -f "$FINDINGS_FILE" ]] && grep -q "OPERATING SYSTEM / KERNEL UPDATES" "$FINDINGS_FILE" 2>/dev/null; then
                     kpkgs=$(awk '/^OPERATING SYSTEM \/ KERNEL UPDATES/{flag=1; next} flag && /^===/{if(seen){exit}else{seen=1; next}} flag && seen{print}' "$FINDINGS_FILE" 2>/dev/null | grep -v '^None$' || true)
                 elif command -v apt >/dev/null 2>&1; then
-                    kpkgs=$(apt list --upgradable 2>/dev/null | grep -E '^linux-(base|image|headers|modules|generic|tools|firmware)' || true)
+                    kpkgs=$(apt list --upgradable 2>/dev/null | grep -E '^linux-image(-|\/)' || true)
                 elif command -v dnf >/dev/null 2>&1; then
-                    kpkgs=$(dnf check-update -q 2>/dev/null | grep -Ei 'kernel|linux-firmware' || true)
+                    kpkgs=$(dnf check-update -q 2>/dev/null | grep -E '^kernel(-(core|rt|rt-core|uek|uek-core|ml|ml-core|lt|lt-core))?(\.|\s)' || true)
                 elif command -v yum >/dev/null 2>&1; then
-                    kpkgs=$(yum check-update -q 2>/dev/null | grep -Ei 'kernel|linux-firmware' || true)
+                    kpkgs=$(yum check-update -q 2>/dev/null | grep -E '^kernel(-(core|rt|rt-core|uek|uek-core|ml|ml-core|lt|lt-core))?(\.|\s)' || true)
                 fi
                 if [[ -z "$KERNEL_UPDATE_COUNT" || "$KERNEL_UPDATE_COUNT" -eq 0 ]] && [[ -n "$kpkgs" ]]; then
                     KERNEL_UPDATE_COUNT=$(printf '%s\n' "$kpkgs" | grep -c . || echo 0)
