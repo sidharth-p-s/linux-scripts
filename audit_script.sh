@@ -2042,7 +2042,7 @@ get_red_issue_and_rec() {
             local eol_php
             eol_php=$(get_formatted_eol_php)
             ITEM_ISSUE="End of Life PHP version(s) detected: $eol_php"
-            ITEM_RECOMMENDATION="$eol_php reached End of Life, and are no longer receiving any security patches from PHP. This means it will no longer have security support and could be exposed to unpatched security vulnerabilities. We recommend to update PHP version to 8.0 or higher."
+            ITEM_RECOMMENDATION="$eol_php reached End of Life, and are no longer receiving any security patches from PHP. This means it will no longer have security support and could be exposed to unpatched security vulnerabilities. We recommend to update PHP version to 8.2 or higher."
             ;;
         "tmp_security")
             ITEM_ISSUE="/tmp directory is not mounted with noexec."
