@@ -1948,7 +1948,7 @@ get_red_issue_and_rec() {
             ;;
         "os_kernel_update")
             ITEM_ISSUE="Operating System / Kernel updates available (${KERNEL_UPDATE_COUNT:-0} pending package update(s))"
-            ITEM_RECOMMENDATION="Kernel and OS updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
+            ITEM_RECOMMENDATION="Kernel updates are available. We recommend scheduling the upgrade in off-peak hours to minimize the impact on customers and website users. Please let us know your preferred date & time (time zone) to schedule the upgrade."
             ;;
         "php_update")
             ITEM_ISSUE="PHP package updates are available (${PHP_UPDATE_COUNT:-0} pending update(s))"
