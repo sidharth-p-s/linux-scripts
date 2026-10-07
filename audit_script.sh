@@ -1944,7 +1944,7 @@ get_red_issue_and_rec() {
             ;;
         "rootkit_scanner")
             ITEM_ISSUE="Rootkit scanner tools are missing on the server ($ROOTKIT_SCANNER_DETAIL)."
-            ITEM_RECOMMENDATION="Rootkit scanner is missing on the server. We recommend installing rkhunter and chkrootkit to scan for potential rootkit infections."
+            ITEM_RECOMMENDATION="Rootkit scanner is missing on the server. We recommend installing chkrootkit to scan for potential rootkit infections."
             ;;
         "os_kernel_update")
             ITEM_ISSUE="Operating System / Kernel updates available (${KERNEL_UPDATE_COUNT:-0} pending package update(s))"
