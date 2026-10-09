@@ -2073,7 +2073,7 @@ get_red_issue_and_rec() {
             if [[ -n "${PHP_INSECURE_LIST:-}" ]]; then
                 issue_detail="Dangerous PHP functions (exec, shell_exec, system, passthru) are not disabled in: $PHP_INSECURE_LIST"
             fi
-            ITEM_ISSUE="PHP dangerous functions are found to be enabled on the server $issue_detail)."
+            ITEM_ISSUE="PHP dangerous functions are found to be enabled on the server. $issue_detail)."
             ITEM_RECOMMENDATION="PHP dangerous functions are found to be enabled in the server. Dangerous PHP functions can cause security issues on the server. They must be disabled for preventing unauthorized execution of code on the server."
             ;;
         "root_password")
